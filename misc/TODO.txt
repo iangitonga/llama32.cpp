@@ -1,0 +1,26 @@
+- AVX.
+- OpenMP.
+- Colored output.
+- Top-p sampling
+- More delicate prompts.
+- Type traits
+- Multi-threads
+- Persistent Interaction.
+
+- Implement GPU
+- run stats
+- deploy
+
+- Implement fp16
+- Compute perplexity
+- deploy
+
+- Implement q8
+- Compute perplexity
+- deploy
+
+- Implement q4
+- Compute perplexity
+- deploy
+
+?- Implement mobile [arm]
