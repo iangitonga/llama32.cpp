@@ -6,6 +6,12 @@
 
 #include "metrics.h"
 
+#if defined(__AVX__)
+#include <immintrin.h>
+
+#define SIMD_AVX_LANES 8
+#endif
+
 
 typedef uint16_t Float16;
 
@@ -98,13 +104,21 @@ static const float* G_fp16_to_fp32_table = init_fpcvt_cache();
 // Convert 16-bit float to 32-bit float.
 [[nodiscard]]
 inline float fp16_to_fp32(Float16 half) {
+#if defined(__F16C__)
+    return _cvtsh_ss(half);
+#else 
     return fpcvt::G_fp16_to_fp32_table[half];
+#endif
 }
 
 // Convert 32-bit float to 16-bit float.
 [[nodiscard]]
 inline Float16 fp32_to_fp16(float flt) {
+#if defined(__F16C__)
+    return _cvtss_sh(flt, 0);
+#else
     return fpcvt::fp32_to_fp16(flt);
+#endif
 }
 
 namespace ops {
@@ -112,40 +126,40 @@ namespace ops {
 // tokens   : (n_ctx)
 // emb_table: (n_vocab, d_embd)
 // out      : (n_ctx, d_embd)
-void embed_f32(const int* tokens, float* emb_table, float* out, int n_vocab, int n_ctx, int d_embd)
+void embed_f32(const int* tokens, float* emb_table, float* out, int n_vocab, int n_ctx, int d_embd, int start_pos)
 {
-    for (int i = 0; i < n_ctx; i++) {
+    for (int i = start_pos; i < n_ctx; i++) {
         const int emb_table_idx = tokens[i];
         const void* src = emb_table + emb_table_idx * d_embd;
         void* dest = out + i * d_embd;
         const size_t cpy_size = d_embd * sizeof(float);
-        std::memcpy(dest, src, cpy_size);
+        memcpy(dest, src, cpy_size);
     }
 }
 
-void embed_f16(const int* tokens, Float16* emb_table, Float16* out, int n_vocab, int n_ctx, int d_embd)
+void embed_f16(const int* tokens, Float16* emb_table, Float16* out, int n_vocab, int n_ctx, int d_embd, int start_pos)
 {
-    for (int i = 0; i < n_ctx; i++) {
+    for (int i = start_pos; i < n_ctx; i++) {
         const int emb_table_idx = tokens[i];
         const void* src = emb_table + emb_table_idx * d_embd;
         void* dest = out + i * d_embd;
         const size_t cpy_size = d_embd * sizeof(Float16);
-        std::memcpy(dest, src, cpy_size);
+        memcpy(dest, src, cpy_size);
     }
 }
 
 
-void embed(const int* tokens, char* emb_table, char* out, int n_vocab, int n_ctx, int d_embd, Dtype dtype)
+void embed(const int* tokens, char* emb_table, char* out, int n_vocab, int n_ctx, int d_embd, int start_pos, Dtype dtype)
 {
     Timer timer{&metrics.non_matmul_ms};
 
     switch (dtype) {
         case Dtype::Float16: {
-            embed_f16(tokens, (Float16*)emb_table, (Float16*)out, n_vocab, n_ctx, d_embd);
+            embed_f16(tokens, (Float16*)emb_table, (Float16*)out, n_vocab, n_ctx, d_embd, start_pos);
             break;
         }
         case Dtype::Float32: {
-            embed_f32(tokens, (float*)emb_table, (float*)out, n_vocab, n_ctx, d_embd);
+            embed_f32(tokens, (float*)emb_table, (float*)out, n_vocab, n_ctx, d_embd, start_pos);
             break;
         }
     }
@@ -155,9 +169,9 @@ void embed(const int* tokens, char* emb_table, char* out, int n_vocab, int n_ctx
 // inp   : (n_ctx, d_embd)
 // weight: (d_embd)
 // out   : (n_ctx, d_embd)
-void rms_norm_f32(const float* inp, const float* weight, float* out, int n_ctx, int d_embd, float eps)
+void rms_norm_f32(const float* inp, const float* weight, float* out, int n_ctx, int d_embd, int start_pos, float eps)
 {
-    for (int i = 0; i < n_ctx; i++) {
+    for (int i = start_pos; i < n_ctx; i++) {
         // compute mean of val squared.
         float sum_squares = 0.0f;
         for (int j = 0; j < d_embd; j++) {
@@ -175,9 +189,9 @@ void rms_norm_f32(const float* inp, const float* weight, float* out, int n_ctx, 
     }
 }
 
-void rms_norm_f16(const Float16* inp, const Float16* weight, Float16* out, int n_ctx, int d_embd, float eps)
+void rms_norm_f16(const Float16* inp, const Float16* weight, Float16* out, int n_ctx, int d_embd, int start_pos, float eps)
 {
-    for (int i = 0; i < n_ctx; i++) {
+    for (int i = start_pos; i < n_ctx; i++) {
         // compute mean of val squared.
         float sum_squares = 0.0f;
         for (int j = 0; j < d_embd; j++) {
@@ -196,17 +210,17 @@ void rms_norm_f16(const Float16* inp, const Float16* weight, Float16* out, int n
 }
 
 
-void rms_norm(const char* inp, const char* weight, char* out, int n_ctx, int d_embd, float eps, Dtype dtype)
+void rms_norm(const char* inp, const char* weight, char* out, int n_ctx, int d_embd, int start_pos, float eps, Dtype dtype)
 {
     Timer timer{&metrics.non_matmul_ms};
 
     switch (dtype) {
         case Dtype::Float16: {
-            rms_norm_f16((Float16*)inp, (Float16*)weight, (Float16*)out, n_ctx, d_embd, eps);
+            rms_norm_f16((Float16*)inp, (Float16*)weight, (Float16*)out, n_ctx, d_embd, start_pos, eps);
             break;
         }
         case Dtype::Float32: {
-            rms_norm_f32((float*)inp, (float*)weight, (float*)out, n_ctx, d_embd, eps);
+            rms_norm_f32((float*)inp, (float*)weight, (float*)out, n_ctx, d_embd, start_pos, eps);
             break;
         }
     }
@@ -216,35 +230,35 @@ void rms_norm(const char* inp, const char* weight, char* out, int n_ctx, int d_e
 // inp0: (n_ctx, d_embd)
 // inp1: (n_ctx, d_embd)
 // out: (n_ctx, d_embd)
-void residual_f32(const float* inp0, const float* inp1, float* out, int n_ctx, int d_embd)
+void residual_f32(const float* inp0, const float* inp1, float* out, int n_ctx, int d_embd, int start_pos)
 {
-    for (int i = 0; i < n_ctx; i++) {
+    for (int i = start_pos; i < n_ctx; i++) {
         for (int j = 0; j < d_embd; j++) {
             out[i * d_embd + j] = inp0[i * d_embd + j] + inp1[i * d_embd + j];
         }
     }
 }
 
-void residual_f16(const Float16* inp0, const Float16* inp1, Float16* out, int n_ctx, int d_embd)
+void residual_f16(const Float16* inp0, const Float16* inp1, Float16* out, int n_ctx, int d_embd, int start_pos)
 {
-    for (int i = 0; i < n_ctx; i++) {
+    for (int i = start_pos; i < n_ctx; i++) {
         for (int j = 0; j < d_embd; j++) {
             out[i * d_embd + j] = fp32_to_fp16(fp16_to_fp32(inp0[i * d_embd + j]) + fp16_to_fp32(inp1[i * d_embd + j]));
         }
     }
 }
 
-void residual(const char* inp0, const char* inp1, char* out, int n_ctx, int d_embd, Dtype dtype)
+void residual(const char* inp0, const char* inp1, char* out, int n_ctx, int d_embd, int start_pos, Dtype dtype)
 {
     Timer timer{&metrics.non_matmul_ms};
 
     switch (dtype) {
         case Dtype::Float16: {
-            residual_f16((Float16*)inp0, (Float16*)inp1, (Float16*)out, n_ctx, d_embd);
+            residual_f16((Float16*)inp0, (Float16*)inp1, (Float16*)out, n_ctx, d_embd, start_pos);
             break;
         }
         case Dtype::Float32: {
-            residual_f32((float*)inp0, (float*)inp1, (float*)out, n_ctx, d_embd);
+            residual_f32((float*)inp0, (float*)inp1, (float*)out, n_ctx, d_embd, start_pos);
             break;
         }
     }
@@ -282,53 +296,6 @@ void mul_inplace(char* inp0, const char* inp1, int n_ctx, int d_embd, int start_
         }
         case Dtype::Float32: {
             mul_inplace_f32((float*)inp0, (float*)inp1, n_ctx, d_embd, start_pos);
-            break;
-        }
-    }
-}
-
-// Computes logits for next-token pred only.
-// inp   : n_ctx, d_embd
-// weight: n_vocab, d_embd
-// out   : n_vocab 
-void lm_head_proj_f32(const float* inp, const float* weight, float* out, int n_vocab, int n_ctx, int d_embd)
-{
-    for (int i = n_ctx - 1; i < n_ctx; i++) {
-        for (int j = 0; j < n_vocab; j++) {
-            float dot_prod = 0.0f;
-            for (int k = 0; k < d_embd; k++) {
-                dot_prod += inp[i * d_embd + k] * weight[j * d_embd + k];
-            }
-            out[j] = dot_prod;
-        }
-    }
-}
-
-void lm_head_proj_f16(const Float16* inp, const Float16* weight, float* out, int n_vocab, int n_ctx, int d_embd)
-{
-    for (int i = n_ctx - 1; i < n_ctx; i++) {
-        for (int j = 0; j < n_vocab; j++) {
-            float dot_prod = 0.0f;
-            for (int k = 0; k < d_embd; k++) {
-                dot_prod += fp16_to_fp32(inp[i * d_embd + k]) * fp16_to_fp32(weight[j * d_embd + k]);
-            }
-            out[j] = dot_prod;
-        }
-    }
-}
-
-
-void lm_head_proj(const char* inp, const char* weight, float* out, int n_vocab, int n_ctx, int d_embd, Dtype dtype)
-{
-    Timer timer{&metrics.matmul_ms};
-
-    switch (dtype) {
-        case Dtype::Float16: {
-            lm_head_proj_f16((Float16*)inp, (Float16*)weight, out, n_vocab, n_ctx, d_embd);
-            break;
-        }
-        case Dtype::Float32: {
-            lm_head_proj_f32((float*)inp, (float*)weight, out, n_vocab, n_ctx, d_embd);
             break;
         }
     }
@@ -372,6 +339,121 @@ void silu_inplace(char* inp, int n_ctx, int d_embd, int start_pos, Dtype dtype)
     }
 }
 
+
+#if defined(__AVX__)
+__m256 vec_f32x8_load(const Float16* src_ptr) {
+#if defined(__F16C__)
+    return _mm256_cvtph_ps(_mm_loadu_si128((__m128i_u *)(const_cast<Float16*>(src_ptr))));
+#else
+    float f32[SIMD_AVX_LANES];
+    for (int i = 0; i < SIMD_AVX_LANES; ++i) {
+        f32[i] = fp16_to_fp32(src_ptr[i]);
+    }
+    return _mm256_loadu_ps(f32);
+#endif
+}
+
+float avx_reduce_sum(const __m256 x)
+{
+    const __m128 hi_quad = _mm256_extractf128_ps(x, 1);
+    const __m128 lo_quad = _mm256_castps256_ps128(x);
+    const __m128 sum_quad = _mm_add_ps(lo_quad, hi_quad);
+    const __m128 lo_dual = sum_quad;
+    const __m128 hi_dual = _mm_movehl_ps(sum_quad, sum_quad);
+    const __m128 sum_dual = _mm_add_ps(lo_dual, hi_dual);
+    const __m128 lo = sum_dual;
+    const __m128 hi = _mm_shuffle_ps(sum_dual, sum_dual, 0x1);
+    const __m128 sum = _mm_add_ss(lo, hi);
+    return _mm_cvtss_f32(sum);
+}
+#endif
+
+
+static float vec_dot_product_f16(const Float16* vec_a, const Float16* vec_b, int vec_size)
+{
+#if defined(__AVX__)
+    const int simd_vec_size = (int)(vec_size / SIMD_AVX_LANES) * SIMD_AVX_LANES;
+    
+    __m256 dot_prod_accum = _mm256_setzero_ps();
+    for (int i = 0; i < simd_vec_size; i += SIMD_AVX_LANES) {
+        const __m256 x0 = vec_f32x8_load(vec_a + i);
+        const __m256 x1 = vec_f32x8_load(vec_b + i);
+        dot_prod_accum = _mm256_add_ps(_mm256_mul_ps(x0, x1), dot_prod_accum);
+    }
+    
+    // const float* f = (float *)(&dot_prod_accum);
+    /// TODO:  Improve this: use simd to reduce sum.
+    // float dot_prod = f[0] + f[1] + f[2] + f[3] + f[4] + f[5] + f[6] + f[7];
+    float dot_prod = avx_reduce_sum(dot_prod_accum);
+
+    for (int i = simd_vec_size; i < vec_size; i++) {
+        const float x0 = fp16_to_fp32(vec_a[i]);
+        const float x1 = fp16_to_fp32(vec_b[i]);
+        dot_prod += x0 * x1;
+    }
+
+#else
+    float dot_prod = 0.0f;
+
+    for (int i = 0; i < vec_size; i += 1) {
+        dot_prod += fp16_to_fp32(vec_a[i]) * fp16_to_fp32(vec_b[i]);
+    }
+
+#endif
+
+    return dot_prod;
+}
+
+// Computes logits for next-token pred only.
+// inp   : n_ctx, d_embd
+// weight: n_vocab, d_embd
+// out   : n_vocab 
+void lm_head_proj_f32(const float* inp, const float* weight, float* out, int n_vocab, int n_ctx, int d_embd)
+{
+    for (int i = n_ctx - 1; i < n_ctx; i++) {
+        for (int j = 0; j < n_vocab; j++) {
+            float dot_prod = 0.0f;
+            for (int k = 0; k < d_embd; k++) {
+                dot_prod += inp[i * d_embd + k] * weight[j * d_embd + k];
+            }
+            out[j] = dot_prod;
+        }
+    }
+}
+
+void lm_head_proj_f16(const Float16* inp, const Float16* weight, float* out, int n_vocab, int n_ctx, int d_embd)
+{
+#if defined(_OPENMP)
+        #pragma omp parallel for collapse(2)
+#endif
+    for (int i = n_ctx - 1; i < n_ctx; i++) {
+        for (int j = 0; j < n_vocab; j++) {
+            const float dot_prod = vec_dot_product_f16(inp + i * d_embd, weight + j*d_embd, d_embd);
+            // for (int k = 0; k < d_embd; k++) {
+            //     dot_prod += fp16_to_fp32(inp[i * d_embd + k]) * fp16_to_fp32(weight[j * d_embd + k]);
+            // }
+            out[j] = dot_prod;
+        }
+    }
+}
+
+
+void lm_head_proj(const char* inp, const char* weight, float* out, int n_vocab, int n_ctx, int d_embd, Dtype dtype)
+{
+    Timer timer{&metrics.matmul_ms};
+
+    switch (dtype) {
+        case Dtype::Float16: {
+            lm_head_proj_f16((Float16*)inp, (Float16*)weight, out, n_vocab, n_ctx, d_embd);
+            break;
+        }
+        case Dtype::Float32: {
+            lm_head_proj_f32((float*)inp, (float*)weight, out, n_vocab, n_ctx, d_embd);
+            break;
+        }
+    }
+}
+
 // inp0: (n_ctx, d_embd)
 // inp1: (n_out, d_embd)
 // out : (n_ctx, n_out)
@@ -390,12 +472,15 @@ void matmul_2d_f32(const float* inp0, const float* inp1, float* out, int n_ctx, 
 
 void matmul_2d_f16(const Float16* inp0, const Float16* inp1, Float16* out, int n_ctx, int d_embd, int n_out, int start_pos)
 {
+#if defined(_OPENMP)
+        #pragma omp parallel for collapse(2)
+#endif
     for (int i = start_pos; i < n_ctx; i++) {
         for (int j = 0; j < n_out; j++) {
-            float dot_prod = 0.0f;
-            for (int k = 0; k < d_embd; k++) {
-                dot_prod += fp16_to_fp32(inp0[i * d_embd + k]) * fp16_to_fp32(inp1[j * d_embd + k]);
-            }
+            const float dot_prod = vec_dot_product_f16(inp0 + i*d_embd, inp1 + j*d_embd, d_embd);
+            // for (int k = 0; k < d_embd; k++) {
+            //     dot_prod += fp16_to_fp32(inp0[i * d_embd + k]) * fp16_to_fp32(inp1[j * d_embd + k]);
+            // }
             out[i * n_out + j] = fp32_to_fp16(dot_prod);
         }
     }   
@@ -450,15 +535,21 @@ void qk_f16(const Float16* q, const Float16* k, Float16* out, int n_ctx, int q_h
     // each of which share a single key and value.
     const int q_group_size = (int)(q_heads / k_heads);
 
+#if defined(_OPENMP)
+    #pragma omp parallel for collapse(2)
+#endif
     for (int h = 0; h < q_heads; h++) {
         for (int i = start_pos; i < n_ctx; i++) {
-            for (int j = 0; j < n_ctx; j++) {
-                float dot_prod = 0.0f;
-                for (int kk = 0; kk < d_head; kk++) {
-                    // index of the current head in k.
-                    const int hk = h / q_group_size;
-                    dot_prod += fp16_to_fp32(q[h * d_head + i * q_heads*d_head + kk]) * fp16_to_fp32(k[hk * d_head + j * k_heads*d_head + kk]);
-                }
+            // Compute the dot products which are not subsequently masked.
+            const int end_non_masked = i + 1; 
+            for (int j = 0; j < end_non_masked; j++) {
+                const int hk = h / q_group_size;
+                const float dot_prod = vec_dot_product_f16(q + h * d_head + i * q_heads*d_head, k + hk*d_head + j * k_heads*d_head, d_head);
+                // for (int kk = 0; kk < d_head; kk++) {
+                //     // index of the current head in k.
+                //     const int hk = h / q_group_size;
+                //     dot_prod += fp16_to_fp32(q[h * d_head + i * q_heads*d_head + kk]) * fp16_to_fp32(k[hk * d_head + j * k_heads*d_head + kk]);
+                // }
                 out[h * n_ctx * n_ctx + i * n_ctx + j] = fp32_to_fp16(dot_prod * scaler);
             }
         }
@@ -623,6 +714,9 @@ void qkv_f16(const Float16* qk, const Float16* v, Float16* out, int n_ctx, int q
     const int v_heads = kv_heads;
     const int qk_group_size = (int)(q_heads / v_heads);
 
+#if defined(_OPENMP)
+    #pragma omp parallel for collapse(2)
+#endif
     for (int h = 0; h < q_heads; h++) {
         for (int i = start_pos; i < n_ctx; i++) {
             for (int j = 0; j < d_head; j++) {
@@ -785,17 +879,24 @@ void rotary_emb(char* inp, int n_ctx, int n_heads, int d_head, int start_pos, Dt
 }
  
 
-void copy_tensors(const char* src, char* dest, size_t size, Dtype dtype)
+void copy_tensors(const char* src, char* dest, int n_ctx, int d_embd, int start_pos, Dtype dtype)
 {
     Timer timer{&metrics.non_matmul_ms};
 
     switch (dtype) {
         case Dtype::Float16: {
-            memcpy(dest, src, size*sizeof(Float16));
+            for (int i = start_pos; i < n_ctx; i++) {
+                memcpy(dest + i * d_embd * sizeof(Float16), src + i * d_embd * sizeof(Float16), d_embd*sizeof(Float16));
+            }
+            
+            // memcpy(dest, src, size*sizeof(Float16));
             break;
         }
         case Dtype::Float32: {
-            memcpy(dest, src, size*sizeof(float));
+            for (int i = start_pos; i < n_ctx; i++) {
+                memcpy(dest + i * d_embd * sizeof(float), src + i * d_embd * sizeof(float), d_embd*sizeof(float));
+            }
+            // memcpy(dest, src, size*sizeof(float));
             break;
         }
     }

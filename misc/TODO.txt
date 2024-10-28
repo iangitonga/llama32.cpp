@@ -1,18 +1,8 @@
-- AVX.
-- OpenMP.
-- Colored output.
-- Top-p sampling
-- More delicate prompts.
-- Type traits
-- Multi-threads
-- Persistent Interaction.
+- single malloc, refactor.
 
-- Implement GPU
+
+- Implement CUDA
 - run stats
-- deploy
-
-- Implement fp16
-- Compute perplexity
 - deploy
 
 - Implement q8
@@ -23,4 +13,15 @@
 - Compute perplexity
 - deploy
 
+
+~ Improve AVX.
+~ Improve OpenMP.
+~ Type traits
+~ Multi-threads
+~ Persistent Interaction.
+~ flash attn.
+
 ?- Implement mobile [arm]
+?- HTTP server
+?- Use bfloat16 instead of float16? AVX support? Perf benefits?
+?- More delicate prompt formats e.g system prompting, json, etc.

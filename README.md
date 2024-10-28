@@ -11,4 +11,8 @@ g++ -std=c++17 -O3 llama32.cpp -o llama32
 ./llama32
 ```
 
+If you have an Intel CPU (Sandy Bridge) or newer, compile with the following line instead to achieve higher performance:
+
+```g++ -mavx -mf16c -O3 llama32.cpp -o llama32```
+
 Run `./llama32 --help` to see all available options.
