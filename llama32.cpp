@@ -59,160 +59,8 @@ struct Llama32Weights
     char* out_norm;
 };
 
-
-char* llama_malloc(size_t nbytes)
-{
-    metrics.total_mem_bytes += nbytes;
-    void* allocated = std::malloc(nbytes);
-    if (!allocated) {
-        std::fprintf(stderr, "Failed to allocate %ld bytes.\n", nbytes);
-        std::exit(-1);
-    }
-
-    return reinterpret_cast<char*>(allocated);
-}
-
-char* llama_malloc(size_t nbytes, Dtype dtype)
-{
-    nbytes = nbytes;
-    if (dtype == Dtype::Float16) {
-        nbytes *= sizeof(Float16);
-    } else {
-        nbytes *= sizeof(float);
-    }
-
-    metrics.total_mem_bytes += nbytes;
-    void* allocated = std::malloc(nbytes);
-    if (!allocated) {
-        std::fprintf(stderr, "Failed to allocate %ld bytes.\n", nbytes);
-        std::exit(-1);
-    }
-
-    return reinterpret_cast<char*>(allocated);
-}
-
-size_t compute_num_weights()
-{
-    size_t nbytes = 0;
-
-    nbytes += cfg.n_vocab * cfg.d_embd;
-    for (int i = 0; i < (int)cfg.n_layers; i++) {
-        nbytes += cfg.d_embd;
-        nbytes += cfg.n_heads * cfg.d_head * cfg.d_embd;
-        nbytes += cfg.n_kv_heads * cfg.d_head * cfg.d_embd;
-        nbytes += cfg.n_kv_heads * cfg.d_head * cfg.d_embd;
-        nbytes += cfg.n_heads * cfg.d_head * cfg.d_embd;
-        nbytes += cfg.d_embd;
-        nbytes += cfg.d_mlp * cfg.d_embd;
-        nbytes += cfg.d_mlp * cfg.d_embd;
-        nbytes += cfg.d_mlp * cfg.d_embd;
-    }
-    
-    nbytes += cfg.d_embd;
-
-    return nbytes;
-}
-
-void alloc_llama32_weights(struct Llama32Weights* w, Dtype dtype)
-{
-    const size_t num_weights = compute_num_weights();
-
-    char* ptr = llama_malloc(num_weights, dtype);
-
-    const int itemsize = dtype == Dtype::Float16 ? sizeof(Float16) : sizeof(float);
-
-    w->emb_table = ptr;
-
-    char* prev_layer_ptr = ptr + cfg.n_vocab * cfg.d_embd * itemsize;
-    for (int i = 0; i < (int)cfg.n_layers; i++) {
-        w->attn_norm[i] = prev_layer_ptr;
-        w->q_proj[i]    = w->attn_norm[i] + cfg.d_embd * itemsize;
-        w->k_proj[i]    = w->q_proj[i] + cfg.n_heads * cfg.d_head * cfg.d_embd * itemsize;
-        w->v_proj[i]    = w->k_proj[i] + cfg.n_kv_heads * cfg.d_head * cfg.d_embd * itemsize;
-        w->o_proj[i]    = w->v_proj[i] + cfg.n_kv_heads * cfg.d_head * cfg.d_embd * itemsize;
-        w->mlp_norm[i]  = w->o_proj[i] + cfg.n_heads * cfg.d_head * cfg.d_embd * itemsize;
-        w->gate_proj[i] = w->mlp_norm[i] + cfg.d_embd * itemsize;
-        w->up_proj[i]   = w->gate_proj[i] + cfg.d_mlp * cfg.d_embd * itemsize;
-        w->down_proj[i] = w->up_proj[i] + cfg.d_mlp * cfg.d_embd * itemsize;
-
-        prev_layer_ptr = w->down_proj[i] + cfg.d_mlp * cfg.d_embd * itemsize;
-    }
-    
-    w->out_norm = prev_layer_ptr;
-}
-
-void free_llama32_weights(struct Llama32Weights* w)
-{
-    std::free(w->emb_table);
-    // for (int i = 0; i < (int)cfg.n_layers; i++) {
-    //     std::free(w->attn_norm[i]);
-    //     std::free(w->q_proj[i]);   
-    //     std::free(w->k_proj[i]); 
-    //     std::free(w->v_proj[i]);
-    //     std::free(w->o_proj[i]);   
-    //     std::free(w->mlp_norm[i]);
-    //     std::free(w->gate_proj[i]);
-    //     std::free(w->up_proj[i]);
-    //     std::free(w->down_proj[i]);
-    // }
-    
-    // std::free(w->out_norm);
-}
-
-
-void init_llama32_weights(const char* fpath, Llama32Weights* w, Dtype dtype)
-{
-    Timer timer{&metrics.load_time_ms};
-
-    std::FILE* fin = std::fopen(fpath, "rb");
-
-    if (!fin) {
-        std::fprintf(stderr, "%s: failed to open %s.\n", __func__, fpath);
-        std::exit(-1);
-    }
-
-    const int64_t true_magic_no = 0x663233616d616c6c; // Hex for ASCII string: llama32f
-    int64_t magic_no;
-    LLAMA32_ASSERT(fread(&magic_no, sizeof(int64_t), 1, fin) == 1);
-
-    if (magic_no != true_magic_no) {
-        fprintf(stderr, "Magic number: %ld failed to match the expected one: %ld.\n", magic_no, true_magic_no);
-        fclose(fin);
-        exit(-1);
-    }
-
-    const struct Llama32Config& c = cfg;
-    int itemsize;
-    if (dtype == Dtype::Float16) { itemsize = sizeof(Float16); }
-    else { itemsize = sizeof(float); }
-
-    const size_t num_weights = compute_num_weights();
-
-    LLAMA32_ASSERT(fread(w->emb_table, itemsize, num_weights, fin) == num_weights);
-
-    // LLAMA32_ASSERT(fread(w->emb_table, itemsize, c.n_vocab*c.d_embd, fin) == c.n_vocab*c.d_embd);
-
-    // for (int i = 0; i < (int)cfg.n_layers; i++) {
-    //     LLAMA32_ASSERT(fread(w->attn_norm[i], itemsize, c.d_embd, fin) == c.d_embd);
-    //     LLAMA32_ASSERT(fread(w->q_proj[i], itemsize, c.n_heads * c.d_head * c.d_embd, fin) == c.n_heads * c.d_head * c.d_embd);
-    //     LLAMA32_ASSERT(fread(w->k_proj[i], itemsize, c.n_kv_heads * c.d_head * c.d_embd, fin) == c.n_kv_heads * c.d_head * c.d_embd);
-    //     LLAMA32_ASSERT(fread(w->v_proj[i], itemsize, c.n_kv_heads * c.d_head * c.d_embd, fin) == c.n_kv_heads * c.d_head * c.d_embd);
-    //     LLAMA32_ASSERT(fread(w->o_proj[i], itemsize, c.n_heads * c.d_head * c.d_embd, fin) == c.n_heads * c.d_head * c.d_embd);
-    //     LLAMA32_ASSERT(fread(w->mlp_norm[i], itemsize, c.d_embd, fin) == c.d_embd);
-    //     LLAMA32_ASSERT(fread(w->gate_proj[i], itemsize, c.d_mlp * c.d_embd, fin) == c.d_mlp * c.d_embd);
-    //     LLAMA32_ASSERT(fread(w->up_proj[i], itemsize, c.d_mlp * c.d_embd, fin) == c.d_mlp * c.d_embd);
-    //     LLAMA32_ASSERT(fread(w->down_proj[i], itemsize, c.d_mlp * c.d_embd, fin) == c.d_mlp * c.d_embd);
-    // }
-    
-    // LLAMA32_ASSERT(fread(w->out_norm, itemsize, c.d_embd, fin) == c.d_embd);
-
-    fclose(fin);
-}
-
 struct Llama32Acvs
 {
-    Timer timer{&metrics.load_time_ms};
-
     char* emb_acv;
     char* attn_norm_acv[NUM_LAYERS];
     char* res_0_acv[NUM_LAYERS];
@@ -232,7 +80,33 @@ struct Llama32Acvs
 };
 
 
-size_t compute_acvs_nbytes(int max_ctx, Dtype dtype)
+size_t get_weights_nbytes(Dtype dtype)
+{
+    size_t nbytes = 0;
+
+    nbytes += cfg.n_vocab * cfg.d_embd;
+    for (int i = 0; i < (int)cfg.n_layers; i++) {
+        nbytes += cfg.d_embd;
+        nbytes += cfg.n_heads * cfg.d_head * cfg.d_embd;
+        nbytes += cfg.n_kv_heads * cfg.d_head * cfg.d_embd;
+        nbytes += cfg.n_kv_heads * cfg.d_head * cfg.d_embd;
+        nbytes += cfg.n_heads * cfg.d_head * cfg.d_embd;
+        nbytes += cfg.d_embd;
+        nbytes += cfg.d_mlp * cfg.d_embd;
+        nbytes += cfg.d_mlp * cfg.d_embd;
+        nbytes += cfg.d_mlp * cfg.d_embd;
+    }
+    
+    nbytes += cfg.d_embd;
+
+    const int itemsize = dtype == Dtype::Float16 ? sizeof(Float16) : sizeof(float);
+    nbytes = nbytes * itemsize;
+
+    return nbytes;
+}
+
+
+size_t get_acvs_nbytes(int max_ctx, Dtype dtype)
 {
     size_t nbytes = 0;
 
@@ -263,13 +137,35 @@ size_t compute_acvs_nbytes(int max_ctx, Dtype dtype)
     return nbytes;
 }
 
-void alloc_llama32_acvs(struct Llama32Acvs* a, Dtype dtype, int max_ctx)
-{
-    Timer timer{&metrics.load_time_ms};
 
+void alloc_llama32_weights(char* ptr, struct Llama32Weights* w, Dtype dtype)
+{
+    const int itemsize = dtype == Dtype::Float16 ? sizeof(Float16) : sizeof(float);
+
+    w->emb_table = ptr;
+
+    char* prev_layer_ptr = ptr + cfg.n_vocab * cfg.d_embd * itemsize;
+    for (int i = 0; i < (int)cfg.n_layers; i++) {
+        w->attn_norm[i] = prev_layer_ptr;
+        w->q_proj[i]    = w->attn_norm[i] + cfg.d_embd * itemsize;
+        w->k_proj[i]    = w->q_proj[i] + cfg.n_heads * cfg.d_head * cfg.d_embd * itemsize;
+        w->v_proj[i]    = w->k_proj[i] + cfg.n_kv_heads * cfg.d_head * cfg.d_embd * itemsize;
+        w->o_proj[i]    = w->v_proj[i] + cfg.n_kv_heads * cfg.d_head * cfg.d_embd * itemsize;
+        w->mlp_norm[i]  = w->o_proj[i] + cfg.n_heads * cfg.d_head * cfg.d_embd * itemsize;
+        w->gate_proj[i] = w->mlp_norm[i] + cfg.d_embd * itemsize;
+        w->up_proj[i]   = w->gate_proj[i] + cfg.d_mlp * cfg.d_embd * itemsize;
+        w->down_proj[i] = w->up_proj[i] + cfg.d_mlp * cfg.d_embd * itemsize;
+
+        prev_layer_ptr = w->down_proj[i] + cfg.d_mlp * cfg.d_embd * itemsize;
+    }
+    
+    w->out_norm = prev_layer_ptr;
+}
+
+
+void alloc_llama32_acvs(char* ptr, struct Llama32Acvs* a, Dtype dtype, int max_ctx)
+{
     const size_t itemsize = dtype == Dtype::Float16 ? sizeof(Float16) : sizeof(float);
-    const size_t acvs_nbytes = compute_acvs_nbytes(max_ctx, dtype);
-    char* ptr = llama_malloc(acvs_nbytes);
 
     a->emb_acv = ptr;
 
@@ -297,27 +193,58 @@ void alloc_llama32_acvs(struct Llama32Acvs* a, Dtype dtype, int max_ctx)
     a->logits_acv    = (float*)(a->out_norm_acv + max_ctx * cfg.d_embd * itemsize); // Always float
 }
 
-void free_llama32_acvs(struct Llama32Acvs* a)
+
+void alloc_llama32(struct Llama32Weights* w, struct Llama32Acvs* a, Dtype dtype, int max_ctx)
 {
-    std::free(a->emb_acv);
-    // for (int i = 0; i < (int)cfg.n_layers; i++) {
-    //     std::free(a->attn_norm_acv[i]);
-    //     std::free(a->res_0_acv[i]);
-    //     std::free(a->res_1_acv[i]);
-    //     std::free(a->q_proj_acv[i]);
-    //     std::free(a->k_proj_acv[i]);
-    //     std::free(a->v_proj_acv[i]);
-    //     std::free(a->o_proj_acv[i]);
-    //     std::free(a->qk_acv[i]);
-    //     std::free(a->qkv_acv[i]);
-    //     std::free(a->mlp_norm_acv[i]);
-    //     std::free(a->mlp_gate_acv[i]);
-    //     std::free(a->mlp_up_acv[i]);
-    //     std::free(a->mlp_down_acv[i]);
-    // }
-    // std::free(a->out_norm_acv);
-    // std::free(a->logits_acv);
+    const size_t weights_nbytes = get_weights_nbytes(dtype);
+    const size_t acvs_nbytes = get_acvs_nbytes(max_ctx, dtype);
+    const size_t total_nbytes = weights_nbytes + acvs_nbytes;
+
+    metrics.total_mem_bytes += total_nbytes;
+    char* memptr = reinterpret_cast<char*>(std::malloc(total_nbytes));
+    if (!memptr) {
+        std::fprintf(stderr, "%s: Failed to allocate %ld bytes.\n", __func__, total_nbytes);
+        std::exit(-1);
+    }
+
+    alloc_llama32_weights(memptr, w, dtype);
+    alloc_llama32_acvs(memptr + weights_nbytes, a, dtype, max_ctx);
 }
+
+void free_llama32(struct Llama32Weights* w, struct Llama32Acvs* a)
+{
+    std::free(w->emb_table);
+}
+
+
+void load_llama32_weights(const char* fpath, Llama32Weights* w, Dtype dtype)
+{
+    Timer timer{&metrics.load_time_ms};
+
+    std::FILE* fin = std::fopen(fpath, "rb");
+
+    if (!fin) {
+        std::fprintf(stderr, "%s: failed to open %s.\n", __func__, fpath);
+        std::exit(-1);
+    }
+
+    const int64_t true_magic_no = 0x663233616d616c6c; // Hex for ASCII string: llama32f
+    int64_t magic_no;
+    LLAMA32_ASSERT(fread(&magic_no, sizeof(int64_t), 1, fin) == 1);
+
+    if (magic_no != true_magic_no) {
+        fprintf(stderr, "Magic number: %ld failed to match the expected one: %ld.\n", magic_no, true_magic_no);
+        fclose(fin);
+        exit(-1);
+    }
+
+    const size_t weights_nbytes = get_weights_nbytes(dtype);
+
+    LLAMA32_ASSERT(fread(w->emb_table, weights_nbytes, 1, fin) == 1);
+
+    fclose(fin);
+}
+
 
 float* forward(const int* tokens, int n_ctx, const struct Llama32Weights* w, struct Llama32Acvs* a, int start_pos, Dtype dtype)
 {
@@ -537,10 +464,8 @@ int main(int argc, char const *argv[])
     struct Llama32Weights w;
     struct Llama32Acvs a;
 
-    alloc_llama32_weights(&w, model_dtype);
-    alloc_llama32_acvs(&a, model_dtype, max_ctx);
-
-    init_llama32_weights(model_path, &w, model_dtype);
+    alloc_llama32(&w, &a, model_dtype, max_ctx);
+    load_llama32_weights(model_path, &w, model_dtype);
 
     // size of the vocab without special tokens eg <|start_of_text|>.
     const int vocab_tok_size = 128000;
@@ -573,8 +498,7 @@ int main(int argc, char const *argv[])
         print_metrics(metrics, processed_toks);
     }
 
-    free_llama32_weights(&w);
-    free_llama32_acvs(&a);
+    free_llama32(&w, &a);
 
     return 0;
 }
