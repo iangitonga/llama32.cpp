@@ -1,5 +1,7 @@
-- single malloc, refactor.
-
+- refactor:
+	~ use Llama32 class
+	~ format metrics report.
+- output formatting e.g **word** should be bold.
 
 - Implement CUDA
 - run stats
