@@ -20,6 +20,29 @@ enum class Dtype {
     Float32,
 };
 
+
+struct InferenceState {
+    const int n_vocab = 128256;
+    const int d_embd = 2048;
+    const int n_heads = 32;
+    const int n_kv_heads = 8;
+    const int d_head = 64;
+    const int d_mlp = 8192;
+    const float rms_norm_eps = 1e-05f;
+    const float qk_scaler = 1.0f / sqrtf(64); // => 1 / d_head
+    Dtype dtype;
+    int n_ctx = 0; // context size.
+    // Start index of the context for uncached computations. I.e Computations for tokens at pos 0
+    // to (start_pos - 1) in the context until pos are cached already.
+    int start_pos = 0;
+
+    InferenceState(Dtype dtype_)
+        : dtype{dtype_}
+    {
+    }
+};
+
+
 namespace fpcvt {
 
 // FP32 <-> FP16 Conversions.
@@ -149,17 +172,17 @@ void embed_f16(const int* tokens, Float16* emb_table, Float16* out, int n_vocab,
 }
 
 
-void embed(const int* tokens, char* emb_table, char* out, int n_vocab, int n_ctx, int d_embd, int start_pos, Dtype dtype)
+void embed(const int* tokens, char* emb_table, char* out, const InferenceState& s)
 {
     Timer timer{&metrics.non_matmul_ms};
 
-    switch (dtype) {
+    switch (s.dtype) {
         case Dtype::Float16: {
-            embed_f16(tokens, (Float16*)emb_table, (Float16*)out, n_vocab, n_ctx, d_embd, start_pos);
+            embed_f16(tokens, (Float16*)emb_table, (Float16*)out, s.n_vocab, s.n_ctx, s.d_embd, s.start_pos);
             break;
         }
         case Dtype::Float32: {
-            embed_f32(tokens, (float*)emb_table, (float*)out, n_vocab, n_ctx, d_embd, start_pos);
+            embed_f32(tokens, (float*)emb_table, (float*)out, s.n_vocab, s.n_ctx, s.d_embd, s.start_pos);
             break;
         }
     }
@@ -210,17 +233,17 @@ void rms_norm_f16(const Float16* inp, const Float16* weight, Float16* out, int n
 }
 
 
-void rms_norm(const char* inp, const char* weight, char* out, int n_ctx, int d_embd, int start_pos, float eps, Dtype dtype)
+void rms_norm(const char* inp, const char* weight, char* out, const InferenceState& s)
 {
     Timer timer{&metrics.non_matmul_ms};
 
-    switch (dtype) {
+    switch (s.dtype) {
         case Dtype::Float16: {
-            rms_norm_f16((Float16*)inp, (Float16*)weight, (Float16*)out, n_ctx, d_embd, start_pos, eps);
+            rms_norm_f16((Float16*)inp, (Float16*)weight, (Float16*)out, s.n_ctx, s.d_embd, s.start_pos, s.rms_norm_eps);
             break;
         }
         case Dtype::Float32: {
-            rms_norm_f32((float*)inp, (float*)weight, (float*)out, n_ctx, d_embd, start_pos, eps);
+            rms_norm_f32((float*)inp, (float*)weight, (float*)out, s.n_ctx, s.d_embd, s.start_pos, s.rms_norm_eps);
             break;
         }
     }
@@ -248,17 +271,17 @@ void residual_f16(const Float16* inp0, const Float16* inp1, Float16* out, int n_
     }
 }
 
-void residual(const char* inp0, const char* inp1, char* out, int n_ctx, int d_embd, int start_pos, Dtype dtype)
+void residual(const char* inp0, const char* inp1, char* out, const InferenceState& s)
 {
     Timer timer{&metrics.non_matmul_ms};
 
-    switch (dtype) {
+    switch (s.dtype) {
         case Dtype::Float16: {
-            residual_f16((Float16*)inp0, (Float16*)inp1, (Float16*)out, n_ctx, d_embd, start_pos);
+            residual_f16((Float16*)inp0, (Float16*)inp1, (Float16*)out, s.n_ctx, s.d_embd, s.start_pos);
             break;
         }
         case Dtype::Float32: {
-            residual_f32((float*)inp0, (float*)inp1, (float*)out, n_ctx, d_embd, start_pos);
+            residual_f32((float*)inp0, (float*)inp1, (float*)out, s.n_ctx, s.d_embd, s.start_pos);
             break;
         }
     }
@@ -285,17 +308,17 @@ void mul_inplace_f16(Float16* inp0, const Float16* inp1, int n_ctx, int d_embd, 
     }
 }
 
-void mul_inplace(char* inp0, const char* inp1, int n_ctx, int d_embd, int start_pos, Dtype dtype)
+void mul_inplace(char* inp0, const char* inp1, const InferenceState& s)
 {
     Timer timer{&metrics.non_matmul_ms};
 
-    switch (dtype) {
+    switch (s.dtype) {
         case Dtype::Float16: {
-            mul_inplace_f16((Float16*)inp0, (Float16*)inp1, n_ctx, d_embd, start_pos);
+            mul_inplace_f16((Float16*)inp0, (Float16*)inp1, s.n_ctx, s.d_mlp, s.start_pos);
             break;
         }
         case Dtype::Float32: {
-            mul_inplace_f32((float*)inp0, (float*)inp1, n_ctx, d_embd, start_pos);
+            mul_inplace_f32((float*)inp0, (float*)inp1, s.n_ctx, s.d_mlp, s.start_pos);
             break;
         }
     }
@@ -323,17 +346,17 @@ void silu_inplace_f16(Float16* inp, int n_ctx, int d_embd, int start_pos)
     }
 }
 
-void silu_inplace(char* inp, int n_ctx, int d_embd, int start_pos, Dtype dtype)
+void silu_inplace(char* inp, const InferenceState& s)
 {
     Timer timer{&metrics.non_matmul_ms};
 
-    switch (dtype) {
+    switch (s.dtype) {
         case Dtype::Float16: {
-            silu_inplace_f16((Float16*)inp, n_ctx, d_embd, start_pos);
+            silu_inplace_f16((Float16*)inp, s.n_ctx, s.d_mlp, s.start_pos);
             break;
         }
         case Dtype::Float32: {
-            silu_inplace_f32((float*)inp, n_ctx, d_embd, start_pos);
+            silu_inplace_f32((float*)inp, s.n_ctx, s.d_mlp, s.start_pos);
             break;
         }
     }
@@ -438,65 +461,65 @@ void lm_head_proj_f16(const Float16* inp, const Float16* weight, float* out, int
 }
 
 
-void lm_head_proj(const char* inp, const char* weight, float* out, int n_vocab, int n_ctx, int d_embd, Dtype dtype)
+void lm_head_proj(const char* inp, const char* weight, float* out, const InferenceState& s)
 {
     Timer timer{&metrics.matmul_ms};
 
-    switch (dtype) {
+    switch (s.dtype) {
         case Dtype::Float16: {
-            lm_head_proj_f16((Float16*)inp, (Float16*)weight, out, n_vocab, n_ctx, d_embd);
+            lm_head_proj_f16((Float16*)inp, (Float16*)weight, out, s.n_vocab, s.n_ctx, s.d_embd);
             break;
         }
         case Dtype::Float32: {
-            lm_head_proj_f32((float*)inp, (float*)weight, out, n_vocab, n_ctx, d_embd);
+            lm_head_proj_f32((float*)inp, (float*)weight, out, s.n_vocab, s.n_ctx, s.d_embd);
             break;
         }
     }
 }
 
-// inp0: (n_ctx, d_embd)
-// inp1: (n_out, d_embd)
-// out : (n_ctx, n_out)
-void matmul_2d_f32(const float* inp0, const float* inp1, float* out, int n_ctx, int d_embd, int n_out, int start_pos)
+// inp0: (n_ctx, d_in)
+// inp1: (d_out, d_in)
+// out : (n_ctx, d_out)
+void matmul_2d_f32(const float* inp0, const float* inp1, float* out, int n_ctx, int d_in, int d_out, int start_pos)
 {
     for (int i = start_pos; i < n_ctx; i++) {
-        for (int j = 0; j < n_out; j++) {
+        for (int j = 0; j < d_out; j++) {
             float dot_prod = 0.0f;
-            for (int k = 0; k < d_embd; k++) {
-                dot_prod += inp0[i * d_embd + k] * inp1[j * d_embd + k];
+            for (int k = 0; k < d_in; k++) {
+                dot_prod += inp0[i * d_in + k] * inp1[j * d_in + k];
             }
-            out[i * n_out + j] = dot_prod;
+            out[i * d_out + j] = dot_prod;
         }
     }   
 }
 
-void matmul_2d_f16(const Float16* inp0, const Float16* inp1, Float16* out, int n_ctx, int d_embd, int n_out, int start_pos)
+void matmul_2d_f16(const Float16* inp0, const Float16* inp1, Float16* out, int n_ctx, int d_in, int d_out, int start_pos)
 {
 #if defined(_OPENMP)
         #pragma omp parallel for collapse(2)
 #endif
     for (int i = start_pos; i < n_ctx; i++) {
-        for (int j = 0; j < n_out; j++) {
-            const float dot_prod = vec_dot_product_f16(inp0 + i*d_embd, inp1 + j*d_embd, d_embd);
+        for (int j = 0; j < d_out; j++) {
+            const float dot_prod = vec_dot_product_f16(inp0 + i*d_in, inp1 + j*d_in, d_in);
             // for (int k = 0; k < d_embd; k++) {
             //     dot_prod += fp16_to_fp32(inp0[i * d_embd + k]) * fp16_to_fp32(inp1[j * d_embd + k]);
             // }
-            out[i * n_out + j] = fp32_to_fp16(dot_prod);
+            out[i * d_out + j] = fp32_to_fp16(dot_prod);
         }
     }   
 }
 
-void matmul_2d(const char* inp0, const char* inp1, char* out, int n_ctx, int d_embd, int n_out, int start_pos, Dtype dtype)
+void matmul_2d(const char* inp0, const char* inp1, char* out, int d_in, int d_out, const InferenceState& s)
 {
     Timer timer{&metrics.matmul_ms};
 
-    switch (dtype) {
+    switch (s.dtype) {
         case Dtype::Float16: {
-            matmul_2d_f16((Float16*)inp0, (Float16*)inp1, (Float16*)out, n_ctx, d_embd, n_out, start_pos);
+            matmul_2d_f16((Float16*)inp0, (Float16*)inp1, (Float16*)out, s.n_ctx, d_in, d_out, s.start_pos);
             break;
         }
         case Dtype::Float32: {
-            matmul_2d_f32((float*)inp0, (float*)inp1, (float*)out, n_ctx, d_embd, n_out, start_pos);
+            matmul_2d_f32((float*)inp0, (float*)inp1, (float*)out, s.n_ctx, d_in, d_out, s.start_pos);
             break;
         }
     }
@@ -556,17 +579,17 @@ void qk_f16(const Float16* q, const Float16* k, Float16* out, int n_ctx, int q_h
     }
 }
 
-void qk(const char* q, const char* k, char* out, int n_ctx, int q_heads, int kv_heads, int d_head, float scaler, int start_pos, Dtype dtype)
+void qk(const char* q, const char* k, char* out, const InferenceState& s)
 {
     Timer timer{&metrics.matmul_ms};
 
-    switch (dtype) {
+    switch (s.dtype) {
         case Dtype::Float16: {
-            qk_f16((Float16*)q, (Float16*)k, (Float16*)out, n_ctx, q_heads, kv_heads, d_head, scaler, start_pos);
+            qk_f16((Float16*)q, (Float16*)k, (Float16*)out, s.n_ctx, s.n_heads, s.n_kv_heads, s.d_head, s.qk_scaler, s.start_pos);
             break;
         }
         case Dtype::Float32: {
-             qk_f32((float*)q, (float*)k, (float*)out, n_ctx, q_heads, kv_heads, d_head, scaler, start_pos);
+             qk_f32((float*)q, (float*)k, (float*)out, s.n_ctx, s.n_heads, s.n_kv_heads, s.d_head, s.qk_scaler, s.start_pos);
             break;
         }
     }
@@ -597,17 +620,17 @@ void attn_mask_inplace_f16(Float16* inp, int n_heads, int n_ctx, int start_pos)
     }
 }
 
-void attn_mask_inplace(char* inp, int n_heads, int n_ctx, int start_pos, Dtype dtype)
+void attn_mask_inplace(char* inp, const InferenceState& s)
 {
     Timer timer{&metrics.non_matmul_ms};
 
-    switch (dtype) {
+    switch (s.dtype) {
         case Dtype::Float16: {
-            attn_mask_inplace_f16((Float16*)inp, n_heads, n_ctx, start_pos);
+            attn_mask_inplace_f16((Float16*)inp, s.n_heads, s.n_ctx, s.start_pos);
             break;
         }
         case Dtype::Float32: {
-            attn_mask_inplace_f32((float*)inp, n_heads, n_ctx, start_pos);
+            attn_mask_inplace_f32((float*)inp, s.n_heads, s.n_ctx, s.start_pos);
             break;
         }
     }
@@ -669,17 +692,17 @@ void softmax_inplace_f16(Float16* inp, int n_heads, int n_ctx, int start_pos)
     }
 }
 
-void softmax_inplace(char* inp, int n_heads, int n_ctx, int start_pos, Dtype dtype)
+void softmax_inplace(char* inp, const InferenceState& s)
 {
     Timer timer{&metrics.non_matmul_ms};
 
-    switch (dtype) {
+    switch (s.dtype) {
         case Dtype::Float16: {
-            softmax_inplace_f16((Float16*)inp, n_heads, n_ctx, start_pos);
+            softmax_inplace_f16((Float16*)inp, s.n_heads, s.n_ctx, s.start_pos);
             break;
         }
         case Dtype::Float32: {
-            softmax_inplace_f32((float*)inp, n_heads, n_ctx, start_pos);
+            softmax_inplace_f32((float*)inp, s.n_heads, s.n_ctx, s.start_pos);
             break;
         }
     }
@@ -733,17 +756,17 @@ void qkv_f16(const Float16* qk, const Float16* v, Float16* out, int n_ctx, int q
 }
 
 
-void qkv(const char* qk, const char* v, char* out, int n_ctx, int q_heads, int kv_heads, int d_head, int start_pos, Dtype dtype)
+void qkv(const char* qk, const char* v, char* out, const InferenceState& s)
 {
     Timer timer{&metrics.matmul_ms};
 
-    switch (dtype) {
+    switch (s.dtype) {
         case Dtype::Float16: {
-            qkv_f16((Float16*)qk, (Float16*)v, (Float16*)out, n_ctx, q_heads, kv_heads, d_head, start_pos);
+            qkv_f16((Float16*)qk, (Float16*)v, (Float16*)out, s.n_ctx, s.n_heads, s.n_kv_heads, s.d_head, s.start_pos);
             break;
         }
         case Dtype::Float32: {
-            qkv_f32((float*)qk, (float*)v, (float*)out, n_ctx, q_heads, kv_heads, d_head, start_pos);
+            qkv_f32((float*)qk, (float*)v, (float*)out, s.n_ctx, s.n_heads, s.n_kv_heads, s.d_head, s.start_pos);
             break;
         }
     }
@@ -862,30 +885,30 @@ void rotary_emb_f16(Float16* inp, int n_ctx, int n_heads, int d_head, int start_
 }
 
 
-void rotary_emb(char* inp, int n_ctx, int n_heads, int d_head, int start_pos, Dtype dtype)
+void rotary_emb(char* inp, int n_heads, const InferenceState& s)
 {
     Timer timer{&metrics.non_matmul_ms};
 
-    switch (dtype) {
+    switch (s.dtype) {
         case Dtype::Float16: {
-            rotary_emb_f16((Float16*)inp, n_ctx, n_heads, d_head, start_pos);
+            rotary_emb_f16((Float16*)inp, s.n_ctx, n_heads, s.d_head, s.start_pos);
             break;
         }
         case Dtype::Float32: {
-            rotary_emb_f32((float*)inp, n_ctx, n_heads, d_head, start_pos);
+            rotary_emb_f32((float*)inp, s.n_ctx, n_heads, s.d_head, s.start_pos);
             break;
         }
     }
 }
  
 
-void copy_tensors(const char* src, char* dest, int n_ctx, int d_embd, int start_pos, Dtype dtype)
+void copy_tensors(const char* src, char* dest, int n_ctx, int d_embd, const InferenceState& s)
 {
     Timer timer{&metrics.non_matmul_ms};
 
-    switch (dtype) {
+    switch (s.dtype) {
         case Dtype::Float16: {
-            for (int i = start_pos; i < n_ctx; i++) {
+            for (int i = s.start_pos; i < n_ctx; i++) {
                 memcpy(dest + i * d_embd * sizeof(Float16), src + i * d_embd * sizeof(Float16), d_embd*sizeof(Float16));
             }
             
@@ -893,7 +916,7 @@ void copy_tensors(const char* src, char* dest, int n_ctx, int d_embd, int start_
             break;
         }
         case Dtype::Float32: {
-            for (int i = start_pos; i < n_ctx; i++) {
+            for (int i = s.start_pos; i < n_ctx; i++) {
                 memcpy(dest + i * d_embd * sizeof(float), src + i * d_embd * sizeof(float), d_embd*sizeof(float));
             }
             // memcpy(dest, src, size*sizeof(float));

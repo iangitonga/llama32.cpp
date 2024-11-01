@@ -1,8 +1,3 @@
-- refactor:
-	~ use Llama32 class
-	~ format metrics report.
-- output formatting e.g **word** should be bold.
-
 - Implement CUDA
 - run stats
 - deploy
@@ -16,12 +11,14 @@
 - deploy
 
 
+~ Improve metrics report.
 ~ Improve AVX.
 ~ Improve OpenMP.
 ~ Type traits
 ~ Multi-threads
 ~ Persistent Interaction.
 ~ flash attn.
+- output formatting e.g **word** should be bold.
 
 ?- Implement mobile [arm]
 ?- HTTP server

@@ -20,51 +20,57 @@
 
 struct Llama32Config
 {
-    uint32_t n_vocab;
-    uint32_t n_layers;
-    uint32_t d_embd;
-    uint32_t n_heads;
-    uint32_t n_kv_heads;
-    uint32_t d_head;
-    uint32_t d_mlp;
-    float rms_norm_eps;
+    int n_vocab;
+    int n_layers;
+    int d_embd;
+    int n_heads;
+    int n_kv_heads;
+    int d_head;
+    int d_mlp;
 };
 
+struct LayerWeights {
+    char* attn_norm;
+    char* q_proj;
+    char* k_proj;
+    char* v_proj;
+    char* o_proj;
+    char* mlp_norm;
+    char* gate_proj;
+    char* up_proj;
+    char* down_proj;
+};
 
 #define NUM_LAYERS 16
 struct Llama32Weights
 {
     char* emb_table;
     // blocks
-    char* attn_norm[NUM_LAYERS];
-    char* q_proj[NUM_LAYERS];
-    char* k_proj[NUM_LAYERS];
-    char* v_proj[NUM_LAYERS];
-    char* o_proj[NUM_LAYERS];
-    char* mlp_norm[NUM_LAYERS];
-    char* gate_proj[NUM_LAYERS];
-    char* up_proj[NUM_LAYERS];
-    char* down_proj[NUM_LAYERS];
-
+    LayerWeights layers[NUM_LAYERS];
     char* out_norm;
+};
+
+struct LayerAcvs
+{
+    char* attn_norm_acv;
+    char* res_0_acv;
+    char* res_1_acv;
+    char* q_proj_acv;
+    char* k_proj_acv;
+    char* v_proj_acv;
+    char* o_proj_acv;
+    char* qk_acv;
+    char* qkv_acv;
+    char* mlp_norm_acv;
+    char* mlp_gate_acv;
+    char* mlp_up_acv;
+    char* mlp_down_acv;
 };
 
 struct Llama32Acvs
 {
     char* emb_acv;
-    char* attn_norm_acv[NUM_LAYERS];
-    char* res_0_acv[NUM_LAYERS];
-    char* res_1_acv[NUM_LAYERS];
-    char* q_proj_acv[NUM_LAYERS];
-    char* k_proj_acv[NUM_LAYERS];
-    char* v_proj_acv[NUM_LAYERS];
-    char* o_proj_acv[NUM_LAYERS];
-    char* qk_acv[NUM_LAYERS];
-    char* qkv_acv[NUM_LAYERS];
-    char* mlp_norm_acv[NUM_LAYERS];
-    char* mlp_gate_acv[NUM_LAYERS];
-    char* mlp_up_acv[NUM_LAYERS];
-    char* mlp_down_acv[NUM_LAYERS];
+    LayerAcvs layers[NUM_LAYERS];
     char* out_norm_acv;
     float* logits_acv;
 };
@@ -85,8 +91,7 @@ public:
         .n_heads = 32,
         .n_kv_heads = 8,
         .d_head = 64,
-        .d_mlp = 8192,
-        .rms_norm_eps = 1e-05f
+        .d_mlp = 8192
     };
 
 public:
@@ -156,25 +161,24 @@ size_t get_acvs_nbytes(Transformer& t)
 
 void alloc_llama32_weights(char* ptr, Transformer& t)
 {
-    const int itemsize = t.dtype == Dtype::Float16 ? sizeof(Float16) : sizeof(float);
-
     const Llama32Config& c = t.config;
+    const int itemsize = t.dtype == Dtype::Float16 ? sizeof(Float16) : sizeof(float);
 
     t.w.emb_table = ptr;
 
     char* prev_layer_ptr = ptr + c.n_vocab * c.d_embd * itemsize;
     for (int i = 0; i < (int)c.n_layers; i++) {
-        t.w.attn_norm[i] = prev_layer_ptr;
-        t.w.q_proj[i]    = t.w.attn_norm[i] + c.d_embd * itemsize;
-        t.w.k_proj[i]    = t.w.q_proj[i]    + c.n_heads * c.d_head * c.d_embd * itemsize;
-        t.w.v_proj[i]    = t.w.k_proj[i]    + c.n_kv_heads * c.d_head * c.d_embd * itemsize;
-        t.w.o_proj[i]    = t.w.v_proj[i]    + c.n_kv_heads * c.d_head * c.d_embd * itemsize;
-        t.w.mlp_norm[i]  = t.w.o_proj[i]    + c.n_heads * c.d_head * c.d_embd * itemsize;
-        t.w.gate_proj[i] = t.w.mlp_norm[i]  + c.d_embd * itemsize;
-        t.w.up_proj[i]   = t.w.gate_proj[i] + c.d_mlp * c.d_embd * itemsize;
-        t.w.down_proj[i] = t.w.up_proj[i]   + c.d_mlp * c.d_embd * itemsize;
+        t.w.layers[i].attn_norm = prev_layer_ptr;
+        t.w.layers[i].q_proj    = t.w.layers[i].attn_norm + c.d_embd * itemsize;
+        t.w.layers[i].k_proj    = t.w.layers[i].q_proj    + c.n_heads * c.d_head * c.d_embd * itemsize;
+        t.w.layers[i].v_proj    = t.w.layers[i].k_proj    + c.n_kv_heads * c.d_head * c.d_embd * itemsize;
+        t.w.layers[i].o_proj    = t.w.layers[i].v_proj    + c.n_kv_heads * c.d_head * c.d_embd * itemsize;
+        t.w.layers[i].mlp_norm  = t.w.layers[i].o_proj    + c.n_heads * c.d_head * c.d_embd * itemsize;
+        t.w.layers[i].gate_proj = t.w.layers[i].mlp_norm  + c.d_embd * itemsize;
+        t.w.layers[i].up_proj   = t.w.layers[i].gate_proj + c.d_mlp * c.d_embd * itemsize;
+        t.w.layers[i].down_proj = t.w.layers[i].up_proj   + c.d_mlp * c.d_embd * itemsize;
 
-        prev_layer_ptr = t.w.down_proj[i] + c.d_mlp * c.d_embd * itemsize;
+        prev_layer_ptr = t.w.layers[i].down_proj + c.d_mlp * c.d_embd * itemsize;
     }
     
     t.w.out_norm = prev_layer_ptr;
@@ -183,29 +187,29 @@ void alloc_llama32_weights(char* ptr, Transformer& t)
 
 void alloc_llama32_acvs(char* ptr, Transformer& t)
 {
-    const size_t itemsize = t.dtype == Dtype::Float16 ? sizeof(Float16) : sizeof(float);
     const Llama32Config& c = t.config;
+    const size_t itemsize = t.dtype == Dtype::Float16 ? sizeof(Float16) : sizeof(float);
 
     t.a.emb_acv = ptr;
 
     char* prev_layer_ptr = ptr + t.max_ctx * c.d_embd * itemsize;
 
     for (int i = 0; i < (int)c.n_layers; i++) {
-        t.a.attn_norm_acv[i] = prev_layer_ptr;
-        t.a.res_0_acv[i]     = t.a.attn_norm_acv[i] + t.max_ctx * c.d_embd * itemsize;
-        t.a.res_1_acv[i]     = t.a.res_0_acv[i]     + t.max_ctx * c.d_embd * itemsize;
-        t.a.q_proj_acv[i]    = t.a.res_1_acv[i]     + t.max_ctx * c.d_embd * itemsize;
-        t.a.k_proj_acv[i]    = t.a.q_proj_acv[i]    + t.max_ctx * c.d_embd * itemsize;
-        t.a.v_proj_acv[i]    = t.a.k_proj_acv[i]    + t.max_ctx * c.d_embd * itemsize;
-        t.a.o_proj_acv[i]    = t.a.v_proj_acv[i]    + t.max_ctx * c.d_embd * itemsize;
-        t.a.qk_acv[i]        = t.a.o_proj_acv[i]    + t.max_ctx * c.d_embd * itemsize;
-        t.a.qkv_acv[i]       = t.a.qk_acv[i]        + c.n_heads * t.max_ctx * t.max_ctx * itemsize;
-        t.a.mlp_gate_acv[i]  = t.a.qkv_acv[i]       + t.max_ctx * c.n_heads * c.d_head * itemsize;
-        t.a.mlp_up_acv[i]    = t.a.mlp_gate_acv[i]  + t.max_ctx * c.d_mlp * itemsize;
-        t.a.mlp_down_acv[i]  = t.a.mlp_up_acv[i]    + t.max_ctx * c.d_mlp * itemsize;
-        t.a.mlp_norm_acv[i]  = t.a.mlp_down_acv[i]  + t.max_ctx * c.d_embd * itemsize;
+        t.a.layers[i].attn_norm_acv = prev_layer_ptr;
+        t.a.layers[i].res_0_acv     = t.a.layers[i].attn_norm_acv + t.max_ctx * c.d_embd * itemsize;
+        t.a.layers[i].res_1_acv     = t.a.layers[i].res_0_acv     + t.max_ctx * c.d_embd * itemsize;
+        t.a.layers[i].q_proj_acv    = t.a.layers[i].res_1_acv     + t.max_ctx * c.d_embd * itemsize;
+        t.a.layers[i].k_proj_acv    = t.a.layers[i].q_proj_acv    + t.max_ctx * c.d_embd * itemsize;
+        t.a.layers[i].v_proj_acv    = t.a.layers[i].k_proj_acv    + t.max_ctx * c.d_embd * itemsize;
+        t.a.layers[i].o_proj_acv    = t.a.layers[i].v_proj_acv    + t.max_ctx * c.d_embd * itemsize;
+        t.a.layers[i].qk_acv        = t.a.layers[i].o_proj_acv    + t.max_ctx * c.d_embd * itemsize;
+        t.a.layers[i].qkv_acv       = t.a.layers[i].qk_acv        + c.n_heads * t.max_ctx * t.max_ctx * itemsize;
+        t.a.layers[i].mlp_gate_acv  = t.a.layers[i].qkv_acv       + t.max_ctx * c.n_heads * c.d_head * itemsize;
+        t.a.layers[i].mlp_up_acv    = t.a.layers[i].mlp_gate_acv  + t.max_ctx * c.d_mlp * itemsize;
+        t.a.layers[i].mlp_down_acv  = t.a.layers[i].mlp_up_acv    + t.max_ctx * c.d_mlp * itemsize;
+        t.a.layers[i].mlp_norm_acv  = t.a.layers[i].mlp_down_acv  + t.max_ctx * c.d_embd * itemsize;
 
-        prev_layer_ptr = t.a.mlp_norm_acv[i] + t.max_ctx * c.d_embd * itemsize;
+        prev_layer_ptr = t.a.layers[i].mlp_norm_acv + t.max_ctx * c.d_embd * itemsize;
     }
 
     t.a.out_norm_acv  = prev_layer_ptr;
@@ -265,59 +269,56 @@ void load_llama32_weights(const char* fpath, Transformer& t)
 }
 
 
-float* forward(Transformer& t, const int* tokens, int n_ctx, int start_pos)
+float* forward(Transformer& t, const int* tokens, const InferenceState& state)
 {
     Timer timer{&metrics.inference_time_ms};
 
-    const Llama32Config& c = t.config;
-
-    ops::embed(tokens, t.w.emb_table, t.a.emb_acv, c.n_vocab, n_ctx, c.d_embd, start_pos, t.dtype);
+    ops::embed(tokens, t.w.emb_table, t.a.emb_acv, state);
 
     char* next_layer_inp = t.a.emb_acv;
 
-    for (int i = 0; i < (int)c.n_layers; i++) {
-        ops::copy_tensors(next_layer_inp, t.a.res_0_acv[i], n_ctx, c.d_embd, start_pos, t.dtype);
+    for (int i = 0; i < t.config.n_layers; i++) {
+        ops::copy_tensors(next_layer_inp, t.a.layers[i].res_0_acv, state.n_ctx, state.d_embd, state);
 
-        ops::rms_norm(next_layer_inp, t.w.attn_norm[i], t.a.attn_norm_acv[i], n_ctx, c.d_embd, start_pos, c.rms_norm_eps, t.dtype);
+        ops::rms_norm(next_layer_inp, t.w.layers[i].attn_norm, t.a.layers[i].attn_norm_acv, state);
 
         // ATTN
         // [n_ctx, n_emb], [d_out, d_embd]
-        const int q_dim = c.n_heads * c.d_head;
-        const int kv_dim = c.n_kv_heads * c.d_head;
-        ops::matmul_2d(t.a.attn_norm_acv[i], t.w.q_proj[i], t.a.q_proj_acv[i], n_ctx, c.d_embd, q_dim, start_pos, t.dtype);
-        ops::matmul_2d(t.a.attn_norm_acv[i], t.w.k_proj[i], t.a.k_proj_acv[i], n_ctx, c.d_embd, kv_dim, start_pos, t.dtype);
-        ops::matmul_2d(t.a.attn_norm_acv[i], t.w.v_proj[i], t.a.v_proj_acv[i], n_ctx, c.d_embd, kv_dim, start_pos, t.dtype);
-        ops::rotary_emb(t.a.q_proj_acv[i], n_ctx, c.n_heads, c.d_head, start_pos, t.dtype);
-        ops::rotary_emb(t.a.k_proj_acv[i], n_ctx, c.n_kv_heads, c.d_head, start_pos, t.dtype);
+        const int q_dim = state.n_heads * state.d_head;
+        const int kv_dim = state.n_kv_heads * state.d_head;
+        ops::matmul_2d(t.a.layers[i].attn_norm_acv, t.w.layers[i].q_proj, t.a.layers[i].q_proj_acv, state.d_embd, q_dim, state);
+        ops::matmul_2d(t.a.layers[i].attn_norm_acv, t.w.layers[i].k_proj, t.a.layers[i].k_proj_acv, state.d_embd, kv_dim, state);
+        ops::matmul_2d(t.a.layers[i].attn_norm_acv, t.w.layers[i].v_proj, t.a.layers[i].v_proj_acv, state.d_embd, kv_dim, state);
+        ops::rotary_emb(t.a.layers[i].q_proj_acv, state.n_heads, state);
+        ops::rotary_emb(t.a.layers[i].k_proj_acv, state.n_kv_heads, state);
 
-        const float qk_scaler = 1.0f / sqrtf(c.d_head);
-        ops::qk(t.a.q_proj_acv[i], t.a.k_proj_acv[i], t.a.qk_acv[i], n_ctx, c.n_heads, c.n_kv_heads, c.d_head, qk_scaler, start_pos, t.dtype);
-        ops::attn_mask_inplace(t.a.qk_acv[i], c.n_heads, n_ctx, start_pos, t.dtype);
-        ops::softmax_inplace(t.a.qk_acv[i], c.n_heads, n_ctx, start_pos, t.dtype);
-        ops::qkv(t.a.qk_acv[i], t.a.v_proj_acv[i], t.a.qkv_acv[i], n_ctx, c.n_heads, c.n_kv_heads, c.d_head, start_pos, t.dtype);
-        ops::matmul_2d(t.a.qkv_acv[i], t.w.o_proj[i], t.a.o_proj_acv[i], n_ctx, c.d_embd, c.d_embd, start_pos, t.dtype);
+        ops::qk(t.a.layers[i].q_proj_acv, t.a.layers[i].k_proj_acv, t.a.layers[i].qk_acv, state);
+        ops::attn_mask_inplace(t.a.layers[i].qk_acv, state);
+        ops::softmax_inplace(t.a.layers[i].qk_acv, state);
+        ops::qkv(t.a.layers[i].qk_acv, t.a.layers[i].v_proj_acv, t.a.layers[i].qkv_acv, state);
+        ops::matmul_2d(t.a.layers[i].qkv_acv, t.w.layers[i].o_proj, t.a.layers[i].o_proj_acv, state.d_embd, state.d_embd, state);
 
-        ops::residual(t.a.o_proj_acv[i], t.a.res_0_acv[i], t.a.res_1_acv[i], n_ctx, c.d_embd, start_pos, t.dtype);
+        ops::residual(t.a.layers[i].o_proj_acv, t.a.layers[i].res_0_acv, t.a.layers[i].res_1_acv, state);
 
         // MLP
         // self.w2(F.silu(self.w1(x)) * self.w3(x))
         // down(silu(gate(x)) * up(x))
-        ops::rms_norm(t.a.res_1_acv[i], t.w.mlp_norm[i], t.a.mlp_norm_acv[i], n_ctx, c.d_embd, start_pos, c.rms_norm_eps, t.dtype);
-        ops::matmul_2d(t.a.mlp_norm_acv[i], t.w.gate_proj[i], t.a.mlp_gate_acv[i], n_ctx, c.d_embd, c.d_mlp, start_pos, t.dtype);
-        ops::matmul_2d(t.a.mlp_norm_acv[i], t.w.up_proj[i], t.a.mlp_up_acv[i], n_ctx, c.d_embd, c.d_mlp, start_pos, t.dtype);
+        ops::rms_norm(t.a.layers[i].res_1_acv, t.w.layers[i].mlp_norm, t.a.layers[i].mlp_norm_acv, state);
+        ops::matmul_2d(t.a.layers[i].mlp_norm_acv, t.w.layers[i].gate_proj, t.a.layers[i].mlp_gate_acv, state.d_embd, state.d_mlp, state);
+        ops::matmul_2d(t.a.layers[i].mlp_norm_acv, t.w.layers[i].up_proj, t.a.layers[i].mlp_up_acv, state.d_embd, state.d_mlp, state);
 
-        ops::silu_inplace(t.a.mlp_gate_acv[i], n_ctx, c.d_mlp, start_pos, t.dtype);
-        ops::mul_inplace(t.a.mlp_gate_acv[i], t.a.mlp_up_acv[i], n_ctx, c.d_mlp, start_pos, t.dtype);
-        ops::matmul_2d(t.a.mlp_gate_acv[i], t.w.down_proj[i], t.a.mlp_down_acv[i], n_ctx, c.d_mlp, c.d_embd, start_pos, t.dtype);
+        ops::silu_inplace(t.a.layers[i].mlp_gate_acv, state);
+        ops::mul_inplace(t.a.layers[i].mlp_gate_acv, t.a.layers[i].mlp_up_acv, state);
+        ops::matmul_2d(t.a.layers[i].mlp_gate_acv, t.w.layers[i].down_proj, t.a.layers[i].mlp_down_acv, state.d_mlp, state.d_embd, state);
 
-        ops::residual(t.a.res_1_acv[i], t.a.mlp_down_acv[i], t.a.res_1_acv[i], n_ctx, c.d_embd, start_pos, t.dtype);
+        ops::residual(t.a.layers[i].res_1_acv, t.a.layers[i].mlp_down_acv, t.a.layers[i].res_1_acv, state);
 
-        next_layer_inp = t.a.res_1_acv[i];
+        next_layer_inp = t.a.layers[i].res_1_acv;
     }
 
-    ops::rms_norm(next_layer_inp, t.w.out_norm, t.a.out_norm_acv, n_ctx, c.d_embd, start_pos, c.rms_norm_eps, t.dtype);
+    ops::rms_norm(next_layer_inp, t.w.out_norm, t.a.out_norm_acv, state);
     
-    ops::lm_head_proj(t.a.out_norm_acv, t.w.emb_table, t.a.logits_acv, c.n_vocab, n_ctx, c.d_embd, t.dtype);
+    ops::lm_head_proj(t.a.out_norm_acv, t.w.emb_table, t.a.logits_acv, state);
 
     return t.a.logits_acv;
 }
@@ -338,12 +339,13 @@ int topk_sample(Transformer& t, Llama32Tokenizer& tokenizer, const std::string& 
     std::vector<std::pair<double, int>> logits_probs;
     logits_probs.reserve(logits_size);
 
-    const int eot_token = tokenizer.eot_id;
-
+    InferenceState state{t.dtype};
     const int n_pred_tokens = t.max_ctx - tokens.size();
     for (int i = 0; i < n_pred_tokens; i++) {
-        const int start_pos = i == 0 ? 0 : tokens.size()-1;
-        const float* logits = forward(t, tokens.data(), tokens.size(), start_pos);
+        state.n_ctx = tokens.size();
+        state.start_pos = i == 0 ? 0 : tokens.size()-1;
+
+        const float* logits = forward(t, tokens.data(), state);
 
         Timer sample_timer{&metrics.sample_time_ms};
 
@@ -391,8 +393,7 @@ int topk_sample(Transformer& t, Llama32Tokenizer& tokenizer, const std::string& 
 
         std::discrete_distribution dist(probs.begin(), probs.end());
         const int pred_token = dist(gen);
-        if (pred_token == eot_token) {
-            // printf("<EOT: %d>\n", eot_token);
+        if (pred_token == tokenizer.eot_id) {
             break;
         }
 
