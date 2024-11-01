@@ -19,22 +19,25 @@ static Metrics metrics;
 
 void print_metrics(const Metrics& m, int n_tokens/*number of processed tokens.*/)
 {
-    std::printf("\n-------------------------------\n");
-    std::printf(" METRICS\n");
-    std::printf("-------------------------------\n");
-    std::printf(" Sample time         : %5ldms\n", m.sample_time_ms);
-    std::printf(" Load time           : %5ldms\n", m.load_time_ms);
-    std::printf(" Inference [per tok] : %5ldms\n", m.inference_time_ms/n_tokens);
-    std::printf(" Inference [total]   : %5ldms\n", m.inference_time_ms);
-    std::printf(" Total runtime       : %5ldms\n", m.total_runtime_ms);
-    std::printf("-------------------------------\n");
-    std::printf(" Mem usage [total]   : %5ldMB\n", m.total_mem_bytes/1000000);
-    // std::cout << " " << "Mem usage [model]   : " << std::setw(4) << weights_mem/1000000 << "MB\n";
-    // std::cout << " " << "Mem usage [actvs]   : " << std::setw(4) << acv_mem/1000000 << "MB\n";
-    std::printf("-------------------------------\n");
-    std::printf(" Matmul   [per tok]  : %5ldms\n", m.matmul_ms/n_tokens);
-    std::printf(" NonMatmul [per tok] : %5ldms\n", m.non_matmul_ms/n_tokens);
-    std::printf("-------------------------------\n\n");
+    const float inference_speed = 1000.0f / ((float)m.inference_time_ms / (float)n_tokens);
+    const int64_t model_size_b = 2471628808;
+    const int64_t acv_size_b = m.total_mem_bytes - model_size_b;
+
+    printf("\n-------------------------------\n");
+    printf(" Tokens per sec      : %5.1f\n", inference_speed);
+    printf(" Inference [per tok] : %5ldms\n", m.inference_time_ms/n_tokens);
+    printf(" Sample time         : %5ldms\n", m.sample_time_ms);
+    printf(" Load time           : %5ldms\n", m.load_time_ms);
+    printf(" Inference [total]   : %5ldms\n", m.inference_time_ms);
+    printf(" Total runtime       : %5ldms\n", m.total_runtime_ms);
+    printf("-------------------------------\n");
+    printf(" Mem usage [total]   : %5ldMB\n", m.total_mem_bytes/1000000);
+    printf(" Mem usage [model]   : %5ldMB\n", model_size_b/1000000);
+    printf(" Mem usage [actvs]   : %5ldMB\n", acv_size_b/1000000);
+    printf("-------------------------------\n");
+    printf(" Matmul   [per tok]  : %5ldms\n", m.matmul_ms/n_tokens);
+    printf(" NonMatmul [per tok] : %5ldms\n", m.non_matmul_ms/n_tokens);
+    printf("-------------------------------\n\n");
 }
 
 
