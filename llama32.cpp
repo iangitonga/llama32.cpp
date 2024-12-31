@@ -79,7 +79,6 @@ struct Llama32Acvs
 class Transformer
 {
 public:
-    Dtype dtype;
     int max_ctx;
     Llama32Weights w;
     Llama32Acvs a;
@@ -95,8 +94,8 @@ public:
     };
 
 public:
-    Transformer(Dtype dtype_, int max_ctx_)
-        : dtype{dtype_}, max_ctx{max_ctx_}
+    Transformer(int max_ctx_)
+        : max_ctx{max_ctx_}
     {}
 };
 
@@ -120,7 +119,7 @@ size_t get_weights_nbytes(Transformer& t)
     
     nbytes += t.config.d_embd;
 
-    const int itemsize = t.dtype == Dtype::Float16 ? sizeof(Float16) : sizeof(float);
+    const int itemsize = sizeof(Float16);
     nbytes = nbytes * itemsize;
 
     return nbytes;
@@ -150,7 +149,7 @@ size_t get_acvs_nbytes(Transformer& t)
 
     nbytes += t.max_ctx * t.config.d_embd;
 
-    const int itemsize = t.dtype == Dtype::Float16 ? sizeof(Float16) : sizeof(float);
+    const int itemsize = sizeof(Float16);
     nbytes = nbytes * itemsize;
 
     nbytes += t.config.n_vocab * sizeof(float); // Always float
@@ -162,7 +161,7 @@ size_t get_acvs_nbytes(Transformer& t)
 void alloc_llama32_weights(char* ptr, Transformer& t)
 {
     const Llama32Config& c = t.config;
-    const int itemsize = t.dtype == Dtype::Float16 ? sizeof(Float16) : sizeof(float);
+    const int itemsize = sizeof(Float16);
 
     t.w.emb_table = ptr;
 
@@ -188,7 +187,7 @@ void alloc_llama32_weights(char* ptr, Transformer& t)
 void alloc_llama32_acvs(char* ptr, Transformer& t)
 {
     const Llama32Config& c = t.config;
-    const size_t itemsize = t.dtype == Dtype::Float16 ? sizeof(Float16) : sizeof(float);
+    const size_t itemsize = sizeof(Float16);
 
     t.a.emb_acv = ptr;
 
@@ -252,6 +251,8 @@ void load_llama32_weights(const char* fpath, Transformer& t)
     }
 
     const int64_t true_magic_no = 0x663233616d616c6c; // Hex for ASCII string: llama32f
+    // 77 68 69 73 70 65 72 66
+    // 0x6672657073696877
     int64_t magic_no;
     LLAMA32_ASSERT(fread(&magic_no, sizeof(int64_t), 1, fin) == 1);
 
@@ -339,7 +340,7 @@ int topk_sample(Transformer& t, Llama32Tokenizer& tokenizer, const std::string& 
     std::vector<std::pair<double, int>> logits_probs;
     logits_probs.reserve(logits_size);
 
-    InferenceState state{t.dtype};
+    InferenceState state{};
     const int n_pred_tokens = t.max_ctx - tokens.size();
     for (int i = 0; i < n_pred_tokens; i++) {
         state.n_ctx = tokens.size();
@@ -424,7 +425,6 @@ int main(int argc, char const *argv[])
     Timer timer{&metrics.total_runtime_ms};
 
     const char* model_path = "models/llama32-1B.fp16.bin";
-    const Dtype model_dtype = Dtype::Float16;
     int max_ctx = 512;
     std::string prompt = "";
 
@@ -483,7 +483,7 @@ int main(int argc, char const *argv[])
         return -1;
     }
 
-    Transformer model{model_dtype, max_ctx};
+    Transformer model{max_ctx};
 
     alloc_llama32(model);
     load_llama32_weights(model_path, model);
