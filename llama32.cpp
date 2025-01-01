@@ -376,9 +376,7 @@ int topk_sample(Transformer& t, Llama32Tokenizer& tokenizer, const std::string& 
     }
     
 
-    InferenceState state{};
-    /// TODO: sort this
-    state.device = t.device;
+    InferenceState state{t.device};
 
     const int n_pred_tokens = t.max_ctx - tokens.size();
     for (int i = 0; i < n_pred_tokens; i++) {
@@ -452,6 +450,22 @@ int topk_sample(Transformer& t, Llama32Tokenizer& tokenizer, const std::string& 
     return tokens.size();
 }
 
+bool cuda_is_available() {
+#if defined(__NVCC__)
+    return true;
+#else
+    return false;
+#endif
+}
+
+Device get_default_device() {
+#if defined(__NVCC__)
+    return Device::CUDA;
+#else
+    return Device::CPU;
+#endif
+}
+
 
 static const char *usage_message = R"(
 USAGE:
@@ -460,6 +474,7 @@ USAGE:
 
 Optional args. 
 -f16 :     Use float-16 model (2.3GB). [default]
+--dev DEVICE: The device to run inference on. Options are (cpu, cuda). Default is cuda if it is available.
 --npred  N : Max context size. Minimum is 128 and max is 8192 [default=512]. Higher values consume more memory.
 )";
 
@@ -471,6 +486,7 @@ int main(int argc, char const *argv[])
     const char* model_path = "models/llama32-1B.fp16.bin";
     int max_ctx = 512;
     std::string prompt = "";
+    Device inference_device = get_default_device();
 
     for (int i = 1; i < argc; i++) {
         std::string_view arg{argv[i]};
@@ -487,13 +503,33 @@ int main(int argc, char const *argv[])
                 i += 1; // fast-forward
             } else {
                 fprintf(stderr, "error: Prompt not provided.\n");
-                fprintf(stderr, "%s\n.", usage_message);
+                return -1;
+            }
+        }
+        else if (arg == "--dev") {
+            if (i + 1 < argc) {
+                std::string_view arg_device(argv[i + 1]);
+                if (arg_device == "cuda") {
+                    if (cuda_is_available()) {
+                        inference_device = Device::CUDA;
+                    } else {
+                        fprintf(stdout, "Warning: cuda device is not available. Running inference on CPU.");
+                    }
+                } else if (arg_device == "cpu") {
+                    inference_device = Device::CPU;
+                } else {
+                    fprintf(stderr, "error: invalid device argument `%s`. Allowed values are `cpu` or `cuda`.\n", arg_device.data());
+                    return -1;
+                }
+                i += 1; // fast-forward
+            } else {
+                fprintf(stderr, "error: Device not provided.\n");
                 return -1;
             }
         }
         else if (arg == "--npred") {
             if (argc <= i+1) {
-                fprintf(stderr, "npred value is missing.\n");
+                fprintf(stderr, "error: npred value is missing.\n");
                 return -1;
             }
             int npred;
@@ -527,11 +563,7 @@ int main(int argc, char const *argv[])
         return -1;
     }
 
-#if defined(__NVCC__)
-    Transformer model{Device::CUDA, max_ctx};
-#else
-    Transformer model{Device::CPU, max_ctx};
-#endif
+    Transformer model{inference_device, max_ctx};
 
     alloc_llama32(model);
     load_llama32_weights(model_path, model);

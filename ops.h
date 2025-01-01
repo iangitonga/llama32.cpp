@@ -35,11 +35,15 @@ struct InferenceState {
     const int d_mlp = 8192;
     const float rms_norm_eps = 1e-05f;
     const float qk_scaler = 1.0f / sqrtf(64); // => 1 / d_head
-    Device device = Device::CPU;
+    Device device;
     int n_ctx = 0; // context size.
     // Start index of the context for uncached computations. I.e Computations for tokens at pos 0
     // to (start_pos - 1) in the context until pos are cached already.
     int start_pos = 0;
+
+    InferenceState(Device device_)
+        : device{device_}
+    {}
 };
 
 
@@ -167,26 +171,8 @@ inline Float16 fp32_to_fp16(float flt) {
 #endif
 }
 
+
 namespace ops {
-
-/*
-
-void embed_f16() {
-    if gpu { ... }
-    else { ... }
-}
-must compile cpu and gpu versions separate.
-
-void embed_f16_cpu() {
-
-}
-
-void embed_f16_gpu() {
-    if gpu_compiler { ... }
-    else { raise Error("not compiled for gpu") }
-}
-
-*/
 
 // tokens   : (n_ctx)
 // emb_table: (n_vocab, d_embd)
