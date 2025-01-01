@@ -370,9 +370,11 @@ int topk_sample(Transformer& t, Llama32Tokenizer& tokenizer, const std::string& 
     std::vector<std::pair<double, int>> logits_probs;
     logits_probs.reserve(logits_size);
 
-#if defined(__NVCC__)
-    float* cu_logits = (float*)llama32_malloc(logits_size*sizeof(float), Device::CPU);
-#endif
+    float* cu_logits;
+    if (t.device == Device::CUDA) {
+        cu_logits = (float*)llama32_malloc(logits_size*sizeof(float), Device::CPU);
+    }
+    
 
     InferenceState state{};
     /// TODO: sort this
@@ -384,10 +386,11 @@ int topk_sample(Transformer& t, Llama32Tokenizer& tokenizer, const std::string& 
         state.start_pos = i == 0 ? 0 : tokens.size()-1;
 
         const float* logits = forward(t, tokens.data(), state);
-#if defined(__NVCC__)
-        ops::copy_cuda_to_host(logits, cu_logits, logits_size*sizeof(float));
-        logits = cu_logits;
-#endif
+        
+        if (t.device == Device::CUDA) {
+            ops::copy_cuda_to_host(logits, cu_logits, logits_size*sizeof(float));
+            logits = cu_logits;
+        }
 
         Timer sample_timer{&metrics.sample_time_ms};
 
