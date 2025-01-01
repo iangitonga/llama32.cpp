@@ -1,3 +1,4 @@
+[CURRENT]
 - Implement CUDA
 - run stats
 - deploy

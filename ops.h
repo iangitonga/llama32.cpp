@@ -14,10 +14,8 @@
 
 #if defined(__NVCC__)
 #define LL32_CUDA_N_BLOCKS 1
-#define LL32_CUDA_N_THREADS 1
+#define LL32_CUDA_N_THREADS 512
 #endif
-
-// #define __NVCC__
 
 
 typedef uint16_t Float16;
@@ -48,6 +46,9 @@ struct InferenceState {
 namespace fpcvt {
 
 // FP32 <-> FP16 Conversions.
+#if defined(__NVCC__)
+__host__ __device__
+#endif
 float fp32_from_bits(uint32_t w) {
     union {
         uint32_t as_bits;
@@ -57,6 +58,9 @@ float fp32_from_bits(uint32_t w) {
     return fp32.as_value;
 }
 
+#if defined(__NVCC__)
+__host__ __device__
+#endif
 uint32_t fp32_to_bits(float f) {
     union {
         float as_value;
@@ -66,6 +70,9 @@ uint32_t fp32_to_bits(float f) {
     return fp32.as_bits;
 }
 
+#if defined(__NVCC__)
+__host__ __device__
+#endif
 float fp16_to_fp32(Float16 h)
 {
     const uint32_t w = (uint32_t) h << 16;
@@ -86,6 +93,9 @@ float fp16_to_fp32(Float16 h)
     return fp32_from_bits(result);
 }
 
+#if defined(__NVCC__)
+__host__ __device__
+#endif
 inline Float16 fp32_to_fp16(float f) noexcept
 {
     const float scale_to_inf = fp32_from_bits(UINT32_C(0x77800000));
@@ -108,8 +118,8 @@ inline Float16 fp32_to_fp16(float f) noexcept
     return (sign >> 16) | (shl1_w > UINT32_C(0xFF000000) ? UINT16_C(0x7E00) : nonsign);
 }
 
-
 static float* init_fpcvt_cache() {
+#if !defined(__NVCC__)
     // TODO: fix memory leak.
     float* cache = new float[65536];
     Float16 idx = 0;
@@ -118,6 +128,9 @@ static float* init_fpcvt_cache() {
         idx += 1;
     }
     return cache;
+#else
+    return nullptr;
+#endif
 }
 
 // Global lookup table for fp16->fp32 to avoid recomputations.
@@ -128,8 +141,13 @@ static const float* G_fp16_to_fp32_table = init_fpcvt_cache();
 
 // Convert 16-bit float to 32-bit float.
 [[nodiscard]]
+#if defined(__NVCC__)
+__host__ __device__
+#endif
 inline float fp16_to_fp32(Float16 half) {
-#if defined(__F16C__)
+#if defined(__NVCC__)
+    return fpcvt::fp16_to_fp32(half);
+#elif defined(__F16C__)
     return _cvtsh_ss(half);
 #else 
     return fpcvt::G_fp16_to_fp32_table[half];
@@ -138,6 +156,9 @@ inline float fp16_to_fp32(Float16 half) {
 
 // Convert 32-bit float to 16-bit float.
 [[nodiscard]]
+#if defined(__NVCC__)
+__host__ __device__
+#endif
 inline Float16 fp32_to_fp16(float flt) {
 #if defined(__F16C__)
     return _cvtss_sh(flt, 0);
@@ -182,12 +203,9 @@ void embed_f16_cpu(const int* tokens, Float16* emb_table, Float16* out, int n_vo
 }
 
 #if defined(__NVCC__)
-__global__
+__host__
 void embed_f16_cuda(const int* tokens, Float16* emb_table, Float16* out, int n_vocab, int n_ctx, int d_embd, int start_pos) {
-    const int th_idx = threadIdx.x;
-    const int th_stride = blockDim.x;
-
-    for (int i = start_pos + th_idx; i < n_ctx; i += th_stride) {
+    for (int i = start_pos; i < n_ctx; i++) {
         const int emb_table_idx = tokens[i];
         const void* src = emb_table + emb_table_idx * d_embd;
         void* dest = out + i * d_embd;
@@ -208,7 +226,7 @@ void embed(const int* tokens, char* emb_table, char* out, const InferenceState& 
         }
         case Device::CUDA: {
 #if defined(__NVCC__)
-            embed_f16_cuda<<<LL32_CUDA_N_BLOCKS, LL32_CUDA_N_THREADS>>>(tokens, (Float16*)emb_table, (Float16*)out, s.n_vocab, s.n_ctx, s.d_embd, s.start_pos);
+            embed_f16_cuda(tokens, (Float16*)emb_table, (Float16*)out, s.n_vocab, s.n_ctx, s.d_embd, s.start_pos);
             cudaDeviceSynchronize();
 #endif
             break;
@@ -530,7 +548,7 @@ void lm_head_proj_f16_cuda(const Float16* inp, const Float16* weight, float* out
     for (int i = n_ctx - 1; i < n_ctx; i++) {
         for (int j = th_idx; j < n_vocab; j += th_stride) {
             float dot_prod;
-            vec_dot_product_f16_cuda<<<1, 1>>>(inp + i * d_embd, weight + j*d_embd, d_embd, &dot_prod);
+            vec_dot_product_f16_cuda(inp + i * d_embd, weight + j*d_embd, d_embd, &dot_prod);
             out[j] = dot_prod;
         }
     }
@@ -548,7 +566,7 @@ void lm_head_proj(const char* inp, const char* weight, float* out, const Inferen
         }
         case Device::CUDA: {
 #if defined(__NVCC__)
-            lm_head_proj_f16<<<LL32_CUDA_N_BLOCKS, LL32_CUDA_N_THREADS>>>((Float16*)inp, (Float16*)weight, out, s.n_vocab, s.n_ctx, s.d_embd);
+            lm_head_proj_f16_cuda<<<LL32_CUDA_N_BLOCKS, LL32_CUDA_N_THREADS>>>((Float16*)inp, (Float16*)weight, out, s.n_vocab, s.n_ctx, s.d_embd);
             cudaDeviceSynchronize();
 #endif            
             break;
@@ -585,7 +603,7 @@ void matmul_2d_f16_cuda(const Float16* inp0, const Float16* inp1, Float16* out, 
     for (int i = start_pos; i < n_ctx; i++) {
         for (int j = th_idx; j < d_out; j += th_stride) {
             float dot_prod;
-            vec_dot_product_f16_cuda<<<1, 1>>>(inp0 + i*d_in, inp1 + j*d_in, d_in, &dot_prod);
+            vec_dot_product_f16_cuda(inp0 + i*d_in, inp1 + j*d_in, d_in, &dot_prod);
             out[i * d_out + j] = fp32_to_fp16(dot_prod);
         }
     }   
@@ -662,7 +680,7 @@ void qk_f16_cuda(const Float16* q, const Float16* k, Float16* out, int n_ctx, in
             for (int j = 0; j < end_non_masked; j++) {
                 const int hk = h / q_group_size;
                 float dot_prod;
-                vec_dot_product_f16_cuda<<<1, 1>>>(q + h * d_head + i * q_heads*d_head, k + hk*d_head + j * k_heads*d_head, d_head, &dot_prod);
+                vec_dot_product_f16_cuda(q + h * d_head + i * q_heads*d_head, k + hk*d_head + j * k_heads*d_head, d_head, &dot_prod);
                 out[h * n_ctx * n_ctx + i * n_ctx + j] = fp32_to_fp16(dot_prod * scaler);
             }
         }
@@ -813,7 +831,7 @@ void softmax_inplace(char* inp, const InferenceState& s)
         }
         case Device::CUDA: {
 #if defined(__NVCC__)
-            softmax_inplace_f16_cuda<<<LL32_CUDA_N_BLOCKS, LL32_CUDA_N_THREADS>>((Float16*)inp, s.n_heads, s.n_ctx, s.start_pos);
+            softmax_inplace_f16_cuda<<<LL32_CUDA_N_BLOCKS, LL32_CUDA_N_THREADS>>>((Float16*)inp, s.n_heads, s.n_ctx, s.start_pos);
             cudaDeviceSynchronize();
 #endif
             break;
@@ -885,7 +903,7 @@ void qkv(const char* qk, const char* v, char* out, const InferenceState& s)
         }
         case Device::CUDA: {
 #if defined(__NVCC__)
-            qkv_f16_cuda<<<LL32_CUDA_N_BLOCKS, LL32_CUDA_N_THREADS>>((Float16*)qk, (Float16*)v, (Float16*)out, s.n_ctx, s.n_heads, s.n_kv_heads, s.d_head, s.start_pos);
+            qkv_f16_cuda<<<LL32_CUDA_N_BLOCKS, LL32_CUDA_N_THREADS>>>((Float16*)qk, (Float16*)v, (Float16*)out, s.n_ctx, s.n_heads, s.n_kv_heads, s.d_head, s.start_pos);
             cudaDeviceSynchronize();
 #endif
             break;
@@ -1022,14 +1040,14 @@ void rotary_emb(char* inp, int n_heads, const InferenceState& s)
         }
         case Device::CUDA: {
 #if defined(__NVCC__)
-            rotary_emb_f16_cuda<<<LL32_CUDA_N_BLOCKS, LL32_CUDA_N_THREADS>>((Float16*)inp, s.n_ctx, n_heads, s.d_head, s.start_pos);
+            rotary_emb_f16_cuda<<<LL32_CUDA_N_BLOCKS, LL32_CUDA_N_THREADS>>>((Float16*)inp, s.n_ctx, n_heads, s.d_head, s.start_pos);
             cudaDeviceSynchronize();
 #endif
             break;
         }
     }
 }
- 
+
 
 void copy_tensors(const char* src, char* dest, int n_ctx, int d_embd, const InferenceState& s)
 {
@@ -1042,9 +1060,23 @@ void copy_tensors(const char* src, char* dest, int n_ctx, int d_embd, const Infe
     }
     else {
 #if defined(__NVCC__)
-    cudaMemcpy(dest, src, cpy_size, cudaMemcpyDeviceToDevice);
+    for (int i = s.start_pos; i < n_ctx; i++) {
+        cudaMemcpy(dest + i * d_embd * sizeof(Float16), src + i * d_embd * sizeof(Float16), d_embd*sizeof(Float16), cudaMemcpyDeviceToDevice);
+    }
 #endif
     }
+}
+
+void copy_cuda_to_host(const void* src, void* dest, size_t size) {
+#if defined(__NVCC__)
+    cudaMemcpy(dest, src, size, cudaMemcpyDeviceToHost);
+#endif
+}
+
+void copy_host_to_cuda(const void* src, void* dest, size_t size) {
+#if defined(__NVCC__)
+    cudaMemcpy(dest, src, size, cudaMemcpyHostToDevice);
+#endif
 }
 
 } // namespace ops.

@@ -79,6 +79,7 @@ struct Llama32Acvs
 class Transformer
 {
 public:
+    Device device;
     int max_ctx;
     Llama32Weights w;
     Llama32Acvs a;
@@ -94,8 +95,8 @@ public:
     };
 
 public:
-    Transformer(int max_ctx_)
-        : max_ctx{max_ctx_}
+    Transformer(Device device_, int max_ctx_)
+        : device{device_}, max_ctx{max_ctx_}
     {}
 };
 
@@ -215,6 +216,35 @@ void alloc_llama32_acvs(char* ptr, Transformer& t)
     t.a.logits_acv    = (float*)(t.a.out_norm_acv + t.max_ctx * c.d_embd * itemsize); // Always float
 }
 
+char* llama32_malloc(size_t size, Device device) {
+    if (device == Device::CPU) {
+        char* memptr = reinterpret_cast<char*>(std::malloc(size));
+        if (!memptr) {
+            std::fprintf(stderr, "%s: Failed to allocate %ld bytes.\n", __func__, size);
+            std::exit(-1);
+        }
+        return memptr;
+    } else {
+        char* memptr;
+#if defined(__NVCC__)
+        if (cudaMalloc(&memptr, size) != cudaSuccess) {
+            std::fprintf(stderr, "%s: Failed to allocate %ld bytes on the GPU.\n", __func__, size);
+            std::exit(-1);
+        }    
+#endif
+        return memptr;
+    }
+}
+
+void llama32_free(void* ptr, Device device) {
+    if (device == Device::CPU) {
+        free(ptr);
+    } else {
+#if defined(__NVCC__)
+        cudaFree(ptr);
+#endif
+    }
+}
 
 void alloc_llama32(Transformer& t)
 {
@@ -223,11 +253,7 @@ void alloc_llama32(Transformer& t)
     const size_t total_nbytes = weights_nbytes + acvs_nbytes;
 
     metrics.total_mem_bytes += total_nbytes;
-    char* memptr = reinterpret_cast<char*>(std::malloc(total_nbytes));
-    if (!memptr) {
-        std::fprintf(stderr, "%s: Failed to allocate %ld bytes.\n", __func__, total_nbytes);
-        std::exit(-1);
-    }
+    char* memptr = llama32_malloc(total_nbytes, t.device);
 
     alloc_llama32_weights(memptr, t);
     alloc_llama32_acvs(memptr + weights_nbytes, t);
@@ -235,7 +261,7 @@ void alloc_llama32(Transformer& t)
 
 void free_llama32(Transformer& t)
 {
-    std::free(t.w.emb_table);
+    llama32_free(t.w.emb_table, t.device);
 }
 
 
@@ -251,8 +277,6 @@ void load_llama32_weights(const char* fpath, Transformer& t)
     }
 
     const int64_t true_magic_no = 0x663233616d616c6c; // Hex for ASCII string: llama32f
-    // 77 68 69 73 70 65 72 66
-    // 0x6672657073696877
     int64_t magic_no;
     LLAMA32_ASSERT(fread(&magic_no, sizeof(int64_t), 1, fin) == 1);
 
@@ -261,10 +285,16 @@ void load_llama32_weights(const char* fpath, Transformer& t)
         fclose(fin);
         exit(-1);
     }
-
     const size_t weights_nbytes = get_weights_nbytes(t);
 
-    LLAMA32_ASSERT(fread(t.w.emb_table, weights_nbytes, 1, fin) == 1);
+    if (t.device == Device::CPU) {
+        LLAMA32_ASSERT(fread(t.w.emb_table, weights_nbytes, 1, fin) == 1);
+    } else {
+        char* host = llama32_malloc(weights_nbytes, Device::CPU);
+        LLAMA32_ASSERT(fread(host, weights_nbytes, 1, fin) == 1);
+        ops::copy_host_to_cuda(host, t.w.emb_table, weights_nbytes);
+        llama32_free(host, Device::CPU);
+    }
 
     fclose(fin);
 }
@@ -340,13 +370,24 @@ int topk_sample(Transformer& t, Llama32Tokenizer& tokenizer, const std::string& 
     std::vector<std::pair<double, int>> logits_probs;
     logits_probs.reserve(logits_size);
 
+#if defined(__NVCC__)
+    float* cu_logits = (float*)llama32_malloc(logits_size*sizeof(float), Device::CPU);
+#endif
+
     InferenceState state{};
+    /// TODO: sort this
+    state.device = t.device;
+
     const int n_pred_tokens = t.max_ctx - tokens.size();
     for (int i = 0; i < n_pred_tokens; i++) {
         state.n_ctx = tokens.size();
         state.start_pos = i == 0 ? 0 : tokens.size()-1;
 
         const float* logits = forward(t, tokens.data(), state);
+#if defined(__NVCC__)
+        ops::copy_cuda_to_host(logits, cu_logits, logits_size*sizeof(float));
+        logits = cu_logits;
+#endif
 
         Timer sample_timer{&metrics.sample_time_ms};
 
@@ -483,7 +524,11 @@ int main(int argc, char const *argv[])
         return -1;
     }
 
-    Transformer model{max_ctx};
+#if defined(__NVCC__)
+    Transformer model{Device::CUDA, max_ctx};
+#else
+    Transformer model{Device::CPU, max_ctx};
+#endif
 
     alloc_llama32(model);
     load_llama32_weights(model_path, model);
