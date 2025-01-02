@@ -1,0 +1,28 @@
+GPU ARCHITECTURE
+
+GPUs are designed to run single-instruction multiple threads(SIMT) programs.
+You run the same program over multiple data.
+
+Run this program for 1600x900=1,440,000 pixels.
+pixel[i] = convert_to_bw(pixel[i]);
+
+There is a limit to the number of threads per block, since all threads of a block are expected to reside
+on the same streaming multiprocessor core and must share the limited memory resources of that core.
+On current GPUs, a thread block may contain up to 1024 threads.
+
+However, a kernel can be executed by multiple equally-shaped thread blocks, so that the total number of
+threads is equal to the number of threads per block times the number of blocks.
+
+
+matmul<<<1, 256>>>(...)
+
+largest matrix
+
+512, 1024 1024, 768
+
+?How many dot prods are you calculating
+
+n_threads = 512 * 768 = 402,432
+
+threads_per_block=256
+num_blocks = n_threads/threads_per_block

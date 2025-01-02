@@ -530,8 +530,8 @@ void lm_head_proj_f16_cpu(const Float16* inp, const Float16* weight, float* out,
 __global__
 void lm_head_proj_f16_cuda(const Float16* inp, const Float16* weight, float* out, int n_vocab, int n_ctx, int d_embd)
 {
-    const int th_idx = threadIdx.x;
-    const int th_stride = blockDim.x;
+    int th_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int th_stride = blockDim.x * gridDim.x;
 
     for (int i = n_ctx - 1; i < n_ctx; i++) {
         for (int j = th_idx; j < n_vocab; j += th_stride) {
@@ -554,7 +554,9 @@ void lm_head_proj(const char* inp, const char* weight, float* out, const Inferen
         }
         case Device::CUDA: {
 #if defined(__NVCC__)
-            lm_head_proj_f16_cuda<<<LL32_CUDA_N_BLOCKS, LL32_CUDA_N_THREADS>>>((Float16*)inp, (Float16*)weight, out, s.n_vocab, s.n_ctx, s.d_embd);
+            int n_threads = 256;
+            int n_blocks = s.n_vocab / n_threads;
+            lm_head_proj_f16_cuda<<<n_blocks, n_threads>>>((Float16*)inp, (Float16*)weight, out, s.n_vocab, s.n_ctx, s.d_embd);
             cudaDeviceSynchronize();
 #endif            
             break;
@@ -582,8 +584,8 @@ void matmul_2d_f16_cpu(const Float16* inp0, const Float16* inp1, Float16* out, i
 __global__
 void matmul_2d_f16_cuda(const Float16* inp0, const Float16* inp1, Float16* out, int n_ctx, int d_in, int d_out, int start_pos)
 {
-    const int th_idx = threadIdx.x;
-    const int th_stride = blockDim.x;
+    int th_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int th_stride = blockDim.x * gridDim.x;
 
     for (int i = start_pos; i < n_ctx; i++) {
         for (int j = th_idx; j < d_out; j += th_stride) {
@@ -606,7 +608,10 @@ void matmul_2d(const char* inp0, const char* inp1, char* out, int d_in, int d_ou
         }
         case Device::CUDA: {
 #if defined(__NVCC__)
-            matmul_2d_f16_cuda<<<LL32_CUDA_N_BLOCKS, LL32_CUDA_N_THREADS>>>((Float16*)inp0, (Float16*)inp1, (Float16*)out, s.n_ctx, d_in, d_out, s.start_pos);
+            int threads_per_block = 256;
+            int n_dot_prods = s.n_ctx * d_out;
+            int n_blocks = n_dot_prods / threads_per_block;
+            matmul_2d_f16_cuda<<<n_blocks, threads_per_block>>>((Float16*)inp0, (Float16*)inp1, (Float16*)out, s.n_ctx, d_in, d_out, s.start_pos);
             cudaDeviceSynchronize();
 #endif            
             break;

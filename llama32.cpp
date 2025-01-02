@@ -225,14 +225,16 @@ char* llama32_malloc(size_t size, Device device) {
         }
         return memptr;
     } else {
-        char* memptr;
 #if defined(__NVCC__)
+        char* memptr;
         if (cudaMalloc(&memptr, size) != cudaSuccess) {
             std::fprintf(stderr, "%s: Failed to allocate %ld bytes on the GPU.\n", __func__, size);
             std::exit(-1);
         }    
-#endif
         return memptr;
+#else
+        return nullptr;
+#endif
     }
 }
 
