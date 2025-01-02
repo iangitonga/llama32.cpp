@@ -123,7 +123,6 @@ inline Float16 fp32_to_fp16(float f) noexcept
 }
 
 static float* init_fpcvt_cache() {
-#if !defined(__NVCC__)
     // TODO: fix memory leak.
     float* cache = new float[65536];
     Float16 idx = 0;
@@ -132,9 +131,6 @@ static float* init_fpcvt_cache() {
         idx += 1;
     }
     return cache;
-#else
-    return nullptr;
-#endif
 }
 
 // Global lookup table for fp16->fp32 to avoid recomputations.
@@ -145,31 +141,40 @@ static const float* G_fp16_to_fp32_table = init_fpcvt_cache();
 
 // Convert 16-bit float to 32-bit float.
 [[nodiscard]]
-#if defined(__NVCC__)
-__host__ __device__
-#endif
-inline float fp16_to_fp32(Float16 half) {
-#if defined(__NVCC__)
-    return fpcvt::fp16_to_fp32(half);
-#elif defined(__F16C__)
+inline float f16_to_f32_cpu(Float16 half) {
+#if defined(__F16C__)
     return _cvtsh_ss(half);
 #else 
     return fpcvt::G_fp16_to_fp32_table[half];
 #endif
 }
 
+#if defined(__NVCC__)
+[[nodiscard]]
+__device__
+inline float f16_to_f32_cuda(Float16 half) {
+    return fpcvt::fp16_to_fp32(half);
+}
+#endif
+
+
 // Convert 32-bit float to 16-bit float.
 [[nodiscard]]
-#if defined(__NVCC__)
-__host__ __device__
-#endif
-inline Float16 fp32_to_fp16(float flt) {
+inline Float16 f32_to_f16_cpu(float flt) {
 #if defined(__F16C__)
     return _cvtss_sh(flt, 0);
 #else
     return fpcvt::fp32_to_fp16(flt);
 #endif
 }
+
+#if defined(__NVCC__)
+[[nodiscard]]
+__device__
+inline Float16 f32_to_f16_cuda(float flt) {
+    return fpcvt::fp32_to_fp16(flt);
+}
+#endif
 
 
 namespace ops {
@@ -231,13 +236,13 @@ void rms_norm_f16_cpu(const Float16* inp, const Float16* weight, Float16* out, i
         float sum_squares = 0.0f;
         for (int j = 0; j < d_embd; j++) {
             /// TODO: Use predefined pow fn.
-            sum_squares += fp16_to_fp32(inp[i * d_embd + j]) * fp16_to_fp32(inp[i * d_embd + j]);
+            sum_squares += f16_to_f32_cpu(inp[i * d_embd + j]) * f16_to_f32_cpu(inp[i * d_embd + j]);
         }
         const float rms = sqrtf(sum_squares / (float)d_embd);
         const float rsqrt = 1.0f / (rms + eps);
         
         for (int j = 0; j < d_embd; j++) {
-            out[i * d_embd + j] = fp32_to_fp16(fp16_to_fp32(inp[i * d_embd + j]) * rsqrt * fp16_to_fp32(weight[j]));
+            out[i * d_embd + j] = f32_to_f16_cpu(f16_to_f32_cpu(inp[i * d_embd + j]) * rsqrt * f16_to_f32_cpu(weight[j]));
         }
         // x = xi / (root_mean_sq + 1e-6f) * wi
         // x = x / (rms+eps) * weight
@@ -255,13 +260,13 @@ void rms_norm_f16_cuda(const Float16* inp, const Float16* weight, Float16* out, 
         float sum_squares = 0.0f;
         for (int j = 0; j < d_embd; j++) {
             /// TODO: Use predefined pow fn.
-            sum_squares += fp16_to_fp32(inp[i * d_embd + j]) * fp16_to_fp32(inp[i * d_embd + j]);
+            sum_squares += f16_to_f32_cuda(inp[i * d_embd + j]) * f16_to_f32_cuda(inp[i * d_embd + j]);
         }
         const float rms = sqrtf(sum_squares / (float)d_embd);
         const float rsqrt = 1.0f / (rms + eps);
         
         for (int j = 0; j < d_embd; j++) {
-            out[i * d_embd + j] = fp32_to_fp16(fp16_to_fp32(inp[i * d_embd + j]) * rsqrt * fp16_to_fp32(weight[j]));
+            out[i * d_embd + j] = f32_to_f16_cuda(f16_to_f32_cuda(inp[i * d_embd + j]) * rsqrt * f16_to_f32_cuda(weight[j]));
         }
     }
 }
@@ -295,7 +300,7 @@ void residual_f16_cpu(const Float16* inp0, const Float16* inp1, Float16* out, in
 {
     for (int i = start_pos; i < n_ctx; i++) {
         for (int j = 0; j < d_embd; j++) {
-            out[i * d_embd + j] = fp32_to_fp16(fp16_to_fp32(inp0[i * d_embd + j]) + fp16_to_fp32(inp1[i * d_embd + j]));
+            out[i * d_embd + j] = f32_to_f16_cpu(f16_to_f32_cpu(inp0[i * d_embd + j]) + f16_to_f32_cpu(inp1[i * d_embd + j]));
         }
     }
 }
@@ -309,7 +314,7 @@ void residual_f16_cuda(const Float16* inp0, const Float16* inp1, Float16* out, i
 
     for (int i = start_pos + th_idx; i < n_ctx; i += th_stride) {
         for (int j = 0; j < d_embd; j++) {
-            out[i * d_embd + j] = fp32_to_fp16(fp16_to_fp32(inp0[i * d_embd + j]) + fp16_to_fp32(inp1[i * d_embd + j]));
+            out[i * d_embd + j] = f32_to_f16_cuda(f16_to_f32_cuda(inp0[i * d_embd + j]) + f16_to_f32_cuda(inp1[i * d_embd + j]));
         }
     }
 }
@@ -341,7 +346,7 @@ void mul_inplace_f16_cpu(Float16* inp0, const Float16* inp1, int n_ctx, int d_em
 {
     for (int i = start_pos; i < n_ctx; i++) {
         for (int j = 0; j < d_embd; j++) {
-            inp0[i * d_embd + j] = fp32_to_fp16(fp16_to_fp32(inp0[i * d_embd + j]) * fp16_to_fp32(inp1[i * d_embd + j]));
+            inp0[i * d_embd + j] = f32_to_f16_cpu(f16_to_f32_cpu(inp0[i * d_embd + j]) * f16_to_f32_cpu(inp1[i * d_embd + j]));
         }
     }
 }
@@ -355,7 +360,7 @@ void mul_inplace_f16_cuda(Float16* inp0, const Float16* inp1, int n_ctx, int d_e
 
     for (int i = start_pos+ th_idx; i < n_ctx; i += th_stride) {
         for (int j = 0; j < d_embd; j++) {
-            inp0[i * d_embd + j] = fp32_to_fp16(fp16_to_fp32(inp0[i * d_embd + j]) * fp16_to_fp32(inp1[i * d_embd + j]));
+            inp0[i * d_embd + j] = f32_to_f16_cuda(f16_to_f32_cuda(inp0[i * d_embd + j]) * f16_to_f32_cuda(inp1[i * d_embd + j]));
         }
     }
 }
@@ -386,8 +391,8 @@ void silu_inplace_f16_cpu(Float16* inp, int n_ctx, int d_embd, int start_pos)
 {
      for (int i = start_pos; i < n_ctx; i++) {
         for (int j = 0; j < d_embd; j++) {
-            const float x = fp16_to_fp32(inp[i * d_embd + j]);
-            inp[i * d_embd + j] = fp32_to_fp16(x / (1.0f + expf(-x)));
+            const float x = f16_to_f32_cpu(inp[i * d_embd + j]);
+            inp[i * d_embd + j] = f32_to_f16_cpu(x / (1.0f + expf(-x)));
         }
     }
 }
@@ -401,8 +406,8 @@ void silu_inplace_f16_cuda(Float16* inp, int n_ctx, int d_embd, int start_pos)
 
      for (int i = start_pos + th_idx; i < n_ctx; i += th_stride) {
         for (int j = 0; j < d_embd; j++) {
-            const float x = fp16_to_fp32(inp[i * d_embd + j]);
-            inp[i * d_embd + j] = fp32_to_fp16(x / (1.0f + expf(-x)));
+            const float x = f16_to_f32_cuda(inp[i * d_embd + j]);
+            inp[i * d_embd + j] = f32_to_f16_cuda(x / (1.0f + expf(-x)));
         }
     }
 }
@@ -435,7 +440,7 @@ __m256 vec_f32x8_load(const Float16* src_ptr) {
 #else
     float f32[SIMD_AVX_LANES];
     for (int i = 0; i < SIMD_AVX_LANES; ++i) {
-        f32[i] = fp16_to_fp32(src_ptr[i]);
+        f32[i] = f16_to_f32_cpu(src_ptr[i]);
     }
     return _mm256_loadu_ps(f32);
 #endif
@@ -475,8 +480,8 @@ float vec_dot_product_f16_cpu(const Float16* vec_a, const Float16* vec_b, int ve
     float dot_prod = avx_reduce_sum(dot_prod_accum);
 
     for (int i = simd_vec_size; i < vec_size; i++) {
-        const float x0 = fp16_to_fp32(vec_a[i]);
-        const float x1 = fp16_to_fp32(vec_b[i]);
+        const float x0 = f16_to_f32_cpu(vec_a[i]);
+        const float x1 = f16_to_f32_cpu(vec_b[i]);
         dot_prod += x0 * x1;
     }
 
@@ -484,7 +489,7 @@ float vec_dot_product_f16_cpu(const Float16* vec_a, const Float16* vec_b, int ve
     float dot_prod = 0.0f;
 
     for (int i = 0; i < vec_size; i += 1) {
-        dot_prod += fp16_to_fp32(vec_a[i]) * fp16_to_fp32(vec_b[i]);
+        dot_prod += f16_to_f32_cpu(vec_a[i]) * f16_to_f32_cpu(vec_b[i]);
     }
 
 #endif
@@ -497,7 +502,7 @@ __device__
 void vec_dot_product_f16_cuda(const Float16* vec_a, const Float16* vec_b, int vec_size, float* out) {
     float dot_prod = 0.0f;
     for (int i = 0; i < vec_size; i += 1) {
-        dot_prod += fp16_to_fp32(vec_a[i]) * fp16_to_fp32(vec_b[i]);
+        dot_prod += f16_to_f32_cuda(vec_a[i]) * f16_to_f32_cuda(vec_b[i]);
     }
     *out = dot_prod;
 }
@@ -515,9 +520,6 @@ void lm_head_proj_f16_cpu(const Float16* inp, const Float16* weight, float* out,
     for (int i = n_ctx - 1; i < n_ctx; i++) {
         for (int j = 0; j < n_vocab; j++) {
             const float dot_prod = vec_dot_product_f16_cpu(inp + i * d_embd, weight + j*d_embd, d_embd);
-            // for (int k = 0; k < d_embd; k++) {
-            //     dot_prod += fp16_to_fp32(inp[i * d_embd + k]) * fp16_to_fp32(weight[j * d_embd + k]);
-            // }
             out[j] = dot_prod;
         }
     }
@@ -571,10 +573,7 @@ void matmul_2d_f16_cpu(const Float16* inp0, const Float16* inp1, Float16* out, i
     for (int i = start_pos; i < n_ctx; i++) {
         for (int j = 0; j < d_out; j++) {
             const float dot_prod = vec_dot_product_f16_cpu(inp0 + i*d_in, inp1 + j*d_in, d_in);
-            // for (int k = 0; k < d_embd; k++) {
-            //     dot_prod += fp16_to_fp32(inp0[i * d_embd + k]) * fp16_to_fp32(inp1[j * d_embd + k]);
-            // }
-            out[i * d_out + j] = fp32_to_fp16(dot_prod);
+            out[i * d_out + j] = f32_to_f16_cpu(dot_prod);
         }
     }   
 }
@@ -590,7 +589,7 @@ void matmul_2d_f16_cuda(const Float16* inp0, const Float16* inp1, Float16* out, 
         for (int j = th_idx; j < d_out; j += th_stride) {
             float dot_prod;
             vec_dot_product_f16_cuda(inp0 + i*d_in, inp1 + j*d_in, d_in, &dot_prod);
-            out[i * d_out + j] = fp32_to_fp16(dot_prod);
+            out[i * d_out + j] = f32_to_f16_cuda(dot_prod);
         }
     }   
 }
@@ -635,12 +634,7 @@ void qk_f16_cpu(const Float16* q, const Float16* k, Float16* out, int n_ctx, int
             for (int j = 0; j < end_non_masked; j++) {
                 const int hk = h / q_group_size;
                 const float dot_prod = vec_dot_product_f16_cpu(q + h * d_head + i * q_heads*d_head, k + hk*d_head + j * k_heads*d_head, d_head);
-                // for (int kk = 0; kk < d_head; kk++) {
-                //     // index of the current head in k.
-                //     const int hk = h / q_group_size;
-                //     dot_prod += fp16_to_fp32(q[h * d_head + i * q_heads*d_head + kk]) * fp16_to_fp32(k[hk * d_head + j * k_heads*d_head + kk]);
-                // }
-                out[h * n_ctx * n_ctx + i * n_ctx + j] = fp32_to_fp16(dot_prod * scaler);
+                out[h * n_ctx * n_ctx + i * n_ctx + j] = f32_to_f16_cpu(dot_prod * scaler);
             }
         }
     }
@@ -667,7 +661,7 @@ void qk_f16_cuda(const Float16* q, const Float16* k, Float16* out, int n_ctx, in
                 const int hk = h / q_group_size;
                 float dot_prod;
                 vec_dot_product_f16_cuda(q + h * d_head + i * q_heads*d_head, k + hk*d_head + j * k_heads*d_head, d_head, &dot_prod);
-                out[h * n_ctx * n_ctx + i * n_ctx + j] = fp32_to_fp16(dot_prod * scaler);
+                out[h * n_ctx * n_ctx + i * n_ctx + j] = f32_to_f16_cuda(dot_prod * scaler);
             }
         }
     }
@@ -700,7 +694,7 @@ void attn_mask_inplace_f16_cpu(Float16* inp, int n_heads, int n_ctx, int start_p
         for (int j = start_pos; j < n_ctx; j++) {
             const int start_ix = j + 1;
             for (int k = start_ix; k < n_ctx; k++) {
-                inp[i * n_ctx * n_ctx + j * n_ctx + k] = fp32_to_fp16(-INFINITY);
+                inp[i * n_ctx * n_ctx + j * n_ctx + k] = f32_to_f16_cpu(-INFINITY);
             }
         }
     }
@@ -717,7 +711,7 @@ void attn_mask_inplace_f16_cuda(Float16* inp, int n_heads, int n_ctx, int start_
         for (int j = start_pos; j < n_ctx; j++) {
             const int start_ix = j + 1;
             for (int k = start_ix; k < n_ctx; k++) {
-                inp[i * n_ctx * n_ctx + j * n_ctx + k] = fp32_to_fp16(-INFINITY);
+                inp[i * n_ctx * n_ctx + j * n_ctx + k] = f32_to_f16_cuda(-INFINITY);
             }
         }
     }
@@ -750,7 +744,7 @@ void softmax_inplace_f16_cpu(Float16* inp, int n_heads, int n_ctx, int start_pos
         for (int i = start_pos; i < n_ctx; i++) {
             float max = -INFINITY;
             for (int j = 0; j < n_ctx; j++) {
-                const float val = fp16_to_fp32(inp[h * n_ctx * n_ctx + i * n_ctx + j]);
+                const float val = f16_to_f32_cpu(inp[h * n_ctx * n_ctx + i * n_ctx + j]);
                 if (val > max) {
                     max = val;
                 }
@@ -759,14 +753,14 @@ void softmax_inplace_f16_cpu(Float16* inp, int n_heads, int n_ctx, int start_pos
             float sum_exp = 0;
             for (int j = 0; j < n_ctx; j++) {
                 const int idx = h * n_ctx * n_ctx + i * n_ctx + j;
-                const float res = expf(fp16_to_fp32(inp[idx]) - max);
+                const float res = expf(f16_to_f32_cpu(inp[idx]) - max);
                 sum_exp += res;
-                inp[idx] = fp32_to_fp16(res);
+                inp[idx] = f32_to_f16_cpu(res);
             }
 
             for (int j = 0; j < n_ctx; j++) {
                 const int idx = h * n_ctx * n_ctx + i * n_ctx + j;
-                inp[idx] = fp32_to_fp16(fp16_to_fp32(inp[idx]) / sum_exp);
+                inp[idx] = f32_to_f16_cpu(f16_to_f32_cpu(inp[idx]) / sum_exp);
             }
         }
     }
@@ -783,7 +777,7 @@ void softmax_inplace_f16_cuda(Float16* inp, int n_heads, int n_ctx, int start_po
         for (int i = start_pos; i < n_ctx; i++) {
             float max = -INFINITY;
             for (int j = 0; j < n_ctx; j++) {
-                const float val = fp16_to_fp32(inp[h * n_ctx * n_ctx + i * n_ctx + j]);
+                const float val = f16_to_f32_cuda(inp[h * n_ctx * n_ctx + i * n_ctx + j]);
                 if (val > max) {
                     max = val;
                 }
@@ -792,14 +786,14 @@ void softmax_inplace_f16_cuda(Float16* inp, int n_heads, int n_ctx, int start_po
             float sum_exp = 0;
             for (int j = 0; j < n_ctx; j++) {
                 const int idx = h * n_ctx * n_ctx + i * n_ctx + j;
-                const float res = expf(fp16_to_fp32(inp[idx]) - max);
+                const float res = expf(f16_to_f32_cuda(inp[idx]) - max);
                 sum_exp += res;
-                inp[idx] = fp32_to_fp16(res);
+                inp[idx] = f32_to_f16_cuda(res);
             }
 
             for (int j = 0; j < n_ctx; j++) {
                 const int idx = h * n_ctx * n_ctx + i * n_ctx + j;
-                inp[idx] = fp32_to_fp16(fp16_to_fp32(inp[idx]) / sum_exp);
+                inp[idx] = f32_to_f16_cuda(f16_to_f32_cuda(inp[idx]) / sum_exp);
             }
         }
     }
@@ -843,9 +837,9 @@ void qkv_f16_cpu(const Float16* qk, const Float16* v, Float16* out, int n_ctx, i
                 for (int k = 0; k < n_ctx; k++) {
                     // index of the current head in v.
                     const int hv = h / qk_group_size;
-                    dot_prod += fp16_to_fp32(qk[h * n_ctx*n_ctx + i * n_ctx + k]) * fp16_to_fp32(v[hv * d_head + j + k * v_heads*d_head]);
+                    dot_prod += f16_to_f32_cpu(qk[h * n_ctx*n_ctx + i * n_ctx + k]) * f16_to_f32_cpu(v[hv * d_head + j + k * v_heads*d_head]);
                 }
-                out[i * q_heads*d_head + h*d_head + j] = fp32_to_fp16(dot_prod);
+                out[i * q_heads*d_head + h*d_head + j] = f32_to_f16_cpu(dot_prod);
             } 
         }
     }
@@ -869,9 +863,9 @@ void qkv_f16_cuda(const Float16* qk, const Float16* v, Float16* out, int n_ctx, 
                 for (int k = 0; k < n_ctx; k++) {
                     // index of the current head in v.
                     const int hv = h / qk_group_size;
-                    dot_prod += fp16_to_fp32(qk[h * n_ctx*n_ctx + i * n_ctx + k]) * fp16_to_fp32(v[hv * d_head + j + k * v_heads*d_head]);
+                    dot_prod += f16_to_f32_cuda(qk[h * n_ctx*n_ctx + i * n_ctx + k]) * f16_to_f32_cuda(v[hv * d_head + j + k * v_heads*d_head]);
                 }
-                out[i * q_heads*d_head + h*d_head + j] = fp32_to_fp16(dot_prod);
+                out[i * q_heads*d_head + h*d_head + j] = f32_to_f16_cuda(dot_prod);
             } 
         }
     }
@@ -906,8 +900,8 @@ void rotary_emb_f16_cpu(Float16* inp, int n_ctx, int n_heads, int d_head, int st
 
             const int d_half = d_head / 2;
             for (int j = 0; j < d_half; ++j) {
-                const float x0 = fp16_to_fp32(inp_vec[j]);
-                const float x1 = fp16_to_fp32(inp_vec[j + d_half]);
+                const float x0 = f16_to_f32_cpu(inp_vec[j]);
+                const float x1 = f16_to_f32_cpu(inp_vec[j + d_half]);
                 
                 const float d = (float)(d_head);
                 const float base_theta = 500000.0f;
@@ -946,8 +940,8 @@ void rotary_emb_f16_cpu(Float16* inp, int n_ctx, int n_heads, int d_head, int st
                 const float o0 = x0 * cosf(m_theta_i) - x1 * sinf(m_theta_i);
                 const float o1 = x0 * sinf(m_theta_i) + x1 * cosf(m_theta_i);
 
-                inp_vec[j] = fp32_to_fp16(o0);
-                inp_vec[j + d_half] = fp32_to_fp16(o1);
+                inp_vec[j] = f32_to_f16_cpu(o0);
+                inp_vec[j + d_half] = f32_to_f16_cpu(o1);
             }
         }
     }
@@ -966,8 +960,8 @@ void rotary_emb_f16_cuda(Float16* inp, int n_ctx, int n_heads, int d_head, int s
 
             const int d_half = d_head / 2;
             for (int j = 0; j < d_half; ++j) {
-                const float x0 = fp16_to_fp32(inp_vec[j]);
-                const float x1 = fp16_to_fp32(inp_vec[j + d_half]);
+                const float x0 = f16_to_f32_cuda(inp_vec[j]);
+                const float x1 = f16_to_f32_cuda(inp_vec[j + d_half]);
                 
                 const float d = (float)(d_head);
                 const float base_theta = 500000.0f;
@@ -1006,8 +1000,8 @@ void rotary_emb_f16_cuda(Float16* inp, int n_ctx, int n_heads, int d_head, int s
                 const float o0 = x0 * cosf(m_theta_i) - x1 * sinf(m_theta_i);
                 const float o1 = x0 * sinf(m_theta_i) + x1 * cosf(m_theta_i);
 
-                inp_vec[j] = fp32_to_fp16(o0);
-                inp_vec[j + d_half] = fp32_to_fp16(o1);
+                inp_vec[j] = f32_to_f16_cuda(o0);
+                inp_vec[j + d_half] = f32_to_f16_cuda(o1);
             }
         }
     }
