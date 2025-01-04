@@ -582,7 +582,7 @@ void matmul_2d_f16_cpu(const Float16* inp0, const Float16* inp1, Float16* out, i
 
 #if defined(__NVCC__)
 __global__
-void matmul_2d_f16_cuda(const Float16* inp0, const Float16* inp1, Float16* out, int n_ctx, int d_in, int d_out, int start_pos)
+void matmul_2d_f16_cuda_naive_impl(const Float16* inp0, const Float16* inp1, Float16* out, int n_ctx, int d_in, int d_out, int start_pos)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     int j = blockIdx.y * blockDim.y + threadIdx.y;
@@ -599,6 +599,85 @@ void matmul_2d_f16_cuda(const Float16* inp0, const Float16* inp1, Float16* out, 
 }
 #endif
 
+void matmul_2d_f16_cuda_naive(const Float16* inp0, const Float16* inp1, Float16* out, int n_ctx, int d_in, int d_out, int start_pos) {
+#if defined(__NVCC__)
+    int ctx_size = n_ctx - start_pos;
+    dim3 block_dim(16, 16);
+    int n_ctx_d = (int)std::ceil(((float)ctx_size)/16.0f);
+    int d_out_d = (int)std::ceil(((float)d_out)/16.0f);
+    dim3 grid_dim(n_ctx_d, d_out_d);
+    matmul_2d_f16_cuda_naive_impl<<<grid_dim, block_dim>>>(inp0, inp1, out, n_ctx, d_in, d_out, start_pos);
+    cudaDeviceSynchronize();
+#endif
+}
+
+/*
+Memory access for this kernel is coalesced such that threads in a single warp
+access consecutive memory.
+
+For execution, the threads of a block are grouped into so-called warps,
+consisting of 32 threads. The grouping into warps happens based on a
+consecutive threadId. Then, threads with neighbouring threadId become part of
+the same warp.
+
+In a GPU sequential memory accesses by threads that are part of the same warp
+can be grouped and executed as one. This is referred to as global memory
+coalescing. It’s the most important thing to keep in mind when optimizing a
+kernel’s GMEM memory accesses toward achieving the peak bandwidth.
+
+In this kernel, we utilise a 1-dim threadblock and then use indices such that
+consecutive threads will access consecutive memory in inp0 and out matrices.
+
+In the naive implementation memory access is as follows:
+
+blockIdx.x=0, threadIdx.x=0: i=0,j=0
+    - We access row 0 from inp0, row 0 from inp1 and row0col0 in out.
+blockIdx.x=0, threadIdx.x=1: i=1,j=0
+    - We access row 1 from inp0, row 0 from inp1 and row1col0 in out.
+- Access for inp1 is consecutive but inp0 and out accesses are not consecutive.
+
+In this implementation:
+
+blockIdx.x=0, threadIdx.x=0: i=0,j=0
+    - We access row 0 from inp0, row 0 from inp1 and row0col0 in out.
+blockIdx.x=0, threadIdx.x=1: i=0,j=1
+    - We access row 0 from inp0, row 0 from inp1 and row0col0 in out.
+- We have consecutive accesses for both inp0 and out which allows for much more
+  coalescing.
+*/
+#if defined(__NVCC__)
+__global__
+void matmul_2d_f16_cuda_coalesced_impl(const Float16* inp0, const Float16* inp1, Float16* out, int n_ctx, int d_in, int d_out, int start_pos)
+{
+    int block_size = 16;
+    int i = blockIdx.x * (blockDim.x / block_size) + (threadIdx.x / block_size);
+    int j = blockIdx.y * (blockDim.x / block_size) + (threadIdx.x % block_size);
+
+    i = i + start_pos;
+
+    if (i < n_ctx && j < d_out) {
+            float dot_prod = 0.0f;
+            for (int k = 0; k < d_in; k += 1) {
+                dot_prod += f16_to_f32_cuda(inp0[i*d_in + k]) * f16_to_f32_cuda(inp1[j*d_in + k]);
+            }
+            out[i * d_out + j] = f32_to_f16_cuda(dot_prod);
+    }   
+}
+#endif
+
+void matmul_2d_f16_cuda_coalesced(const Float16* inp0, const Float16* inp1, Float16* out, int n_ctx, int d_in, int d_out, int start_pos)
+{
+#if defined(__NVCC__)
+    const int ctx_size = n_ctx - start_pos;
+    dim3 block_dim(16*16);
+    const int n_ctx_d = (int)std::ceil(((float)ctx_size)/16.0f);
+    const int d_out_d = (int)std::ceil(((float)d_out)/16.0f);
+    dim3 grid_dim(n_ctx_d, d_out_d);
+    matmul_2d_f16_cuda_coalesced_impl<<<grid_dim, block_dim>>>(inp0, inp1, out, n_ctx, d_in, d_out, start_pos);
+    cudaDeviceSynchronize();
+#endif
+}
+
 void matmul_2d(const char* inp0, const char* inp1, char* out, int d_in, int d_out, const InferenceState& s)
 {
     Timer timer{&metrics.matmul_ms};
@@ -609,15 +688,7 @@ void matmul_2d(const char* inp0, const char* inp1, char* out, int d_in, int d_ou
             break;
         }
         case Device::CUDA: {
-#if defined(__NVCC__)
-            int n_ctxm = s.n_ctx - s.start_pos;
-            dim3 block_dim(16, 16);
-            int n_ctx_c = (int)std::ceil(((float)n_ctxm)/16.0f);
-            int d_out_c = (int)std::ceil(((float)d_out)/16.0f);
-            dim3 grid_dim(n_ctx_c, d_out_c);
-            matmul_2d_f16_cuda<<<grid_dim, block_dim>>>((Float16*)inp0, (Float16*)inp1, (Float16*)out, s.n_ctx, d_in, d_out, s.start_pos);
-            cudaDeviceSynchronize();
-#endif            
+            matmul_2d_f16_cuda_coalesced((Float16*)inp0, (Float16*)inp1, (Float16*)out, s.n_ctx, d_in, d_out, s.start_pos);          
             break;
         }
     }
