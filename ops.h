@@ -179,6 +179,10 @@ inline Float16 f32_to_f16_cuda(float flt) {
 
 namespace ops {
 
+int ceil_div(int n, int m) {
+    return static_cast<int>(std::ceil(((float)n)/(float)m));
+}
+
 // tokens   : (n_ctx)
 // emb_table: (n_vocab, d_embd)
 // out      : (n_ctx, d_embd)
@@ -355,13 +359,11 @@ void mul_inplace_f16_cpu(Float16* inp0, const Float16* inp1, int n_ctx, int d_em
 __global__
 void mul_inplace_f16_cuda(Float16* inp0, const Float16* inp1, int n_ctx, int d_embd, int start_pos)
 {
-    const int th_idx = threadIdx.x;
-    const int th_stride = blockDim.x;
+    const int i = blockIdx.x * blockDim.x + threadIdx.x + start_pos;
+    const int j = blockIdx.y * blockDim.y + threadIdx.y;
 
-    for (int i = start_pos+ th_idx; i < n_ctx; i += th_stride) {
-        for (int j = 0; j < d_embd; j++) {
-            inp0[i * d_embd + j] = f32_to_f16_cuda(f16_to_f32_cuda(inp0[i * d_embd + j]) * f16_to_f32_cuda(inp1[i * d_embd + j]));
-        }
+    if (i < n_ctx && j < d_embd) {
+        inp0[i * d_embd + j] = f32_to_f16_cuda(f16_to_f32_cuda(inp0[i * d_embd + j]) * f16_to_f32_cuda(inp1[i * d_embd + j]));
     }
 }
 #endif
@@ -377,7 +379,9 @@ void mul_inplace(char* inp0, const char* inp1, const InferenceState& s)
         }
         case Device::CUDA: {
 #if defined(__NVCC__)
-            mul_inplace_f16_cuda<<<LL32_CUDA_N_BLOCKS, LL32_CUDA_N_THREADS>>>((Float16*)inp0, (Float16*)inp1, s.n_ctx, s.d_mlp, s.start_pos);
+            dim3 grid_dim(ceil_div(s.n_ctx-s.start_pos, 16), ceil_div(s.d_mlp, 16), 1);
+            dim3 block_dim(16, 16, 1);
+            mul_inplace_f16_cuda<<<grid_dim, block_dim>>>((Float16*)inp0, (Float16*)inp1, s.n_ctx, s.d_mlp, s.start_pos);
             cudaDeviceSynchronize();
 #endif            
             break;
@@ -397,18 +401,17 @@ void silu_inplace_f16_cpu(Float16* inp, int n_ctx, int d_embd, int start_pos)
     }
 }
 
+
 #if defined(__NVCC__)
 __global__
 void silu_inplace_f16_cuda(Float16* inp, int n_ctx, int d_embd, int start_pos)
 {
-    const int th_idx = threadIdx.x;
-    const int th_stride = blockDim.x;
+    const int i = blockIdx.x * blockDim.x + threadIdx.x + start_pos;
+    const int j = blockIdx.y * blockDim.y + threadIdx.y;
 
-     for (int i = start_pos + th_idx; i < n_ctx; i += th_stride) {
-        for (int j = 0; j < d_embd; j++) {
-            const float x = f16_to_f32_cuda(inp[i * d_embd + j]);
-            inp[i * d_embd + j] = f32_to_f16_cuda(x / (1.0f + expf(-x)));
-        }
+     if (i < n_ctx && j < d_embd) {
+          const float x = f16_to_f32_cuda(inp[i * d_embd + j]);
+          inp[i * d_embd + j] = f32_to_f16_cuda(x / (1.0f + expf(-x)));
     }
 }
 #endif
@@ -424,7 +427,9 @@ void silu_inplace(char* inp, const InferenceState& s)
         }
         case Device::CUDA: {
 #if defined(__NVCC__)
-            silu_inplace_f16_cuda<<<LL32_CUDA_N_BLOCKS, LL32_CUDA_N_THREADS>>>((Float16*)inp, s.n_ctx, s.d_mlp, s.start_pos);
+            dim3 grid_dim(ceil_div(s.n_ctx-s.start_pos, 16), ceil_div(s.d_mlp, 16), 1);
+            dim3 block_dim(16, 16, 1);
+            silu_inplace_f16_cuda<<<grid_dim, block_dim>>>((Float16*)inp, s.n_ctx, s.d_mlp, s.start_pos);
             cudaDeviceSynchronize();
 #endif            
             break;
@@ -530,15 +535,13 @@ void lm_head_proj_f16_cpu(const Float16* inp, const Float16* weight, float* out,
 __global__
 void lm_head_proj_f16_cuda(const Float16* inp, const Float16* weight, float* out, int n_vocab, int n_ctx, int d_embd)
 {
-    int th_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int th_stride = blockDim.x * gridDim.x;
+    const int i = n_ctx - 1;
+    const int j = blockIdx.x * blockDim.x + threadIdx.x;
 
-    for (int i = n_ctx - 1; i < n_ctx; i++) {
-        for (int j = th_idx; j < n_vocab; j += th_stride) {
+    if (j < n_vocab) {
             float dot_prod;
             vec_dot_product_f16_cuda(inp + i * d_embd, weight + j*d_embd, d_embd, &dot_prod);
             out[j] = dot_prod;
-        }
     }
 }
 #endif
@@ -554,15 +557,16 @@ void lm_head_proj(const char* inp, const char* weight, float* out, const Inferen
         }
         case Device::CUDA: {
 #if defined(__NVCC__)
-            int n_threads = 256;
-            int n_blocks = s.n_vocab / n_threads;
-            lm_head_proj_f16_cuda<<<n_blocks, n_threads>>>((Float16*)inp, (Float16*)weight, out, s.n_vocab, s.n_ctx, s.d_embd);
+            dim3 grid_dim(ceil_div(s.n_vocab, 256), 1, 1);
+            dim3 block_dim(16*16, 1, 1);
+            lm_head_proj_f16_cuda<<<grid_dim, block_dim>>>((Float16*)inp, (Float16*)weight, out, s.n_vocab, s.n_ctx, s.d_embd);
             cudaDeviceSynchronize();
 #endif            
             break;
         }
     }
 }
+
 
 // inp0: (n_ctx, d_in)
 // inp1: (d_out, d_in)
@@ -678,6 +682,44 @@ void matmul_2d_f16_cuda_coalesced(const Float16* inp0, const Float16* inp1, Floa
 #endif
 }
 
+
+#if defined(__NVCC__)
+__global__
+void matmul2d_f16_cuda_smem_impl(const Float16* inp0, const Float16* inp1, Float16* out, int n_ctx, int d_in, int d_out, int start_pos) {
+    constexpr int block_size = 256;
+    const int n_in_blocks = d_in / block_size;
+
+    const int i = start_pos;
+    const int j = blockIdx.x * blockDim.x + threadIdx.x;
+
+    float dot_prod = 0.0f;
+    for (int b = 0; b < n_in_blocks; b++) {
+
+        __shared__ Float16 inp0_hot[block_size];
+        inp0_hot[threadIdx.x] = inp0[i * d_in + b*block_size + threadIdx.x];
+        __syncthreads();
+
+        for (int k = 0; k < block_size; k += 1) {
+            dot_prod += f16_to_f32_cuda(inp0_hot[k]) * f16_to_f32_cuda(inp1[j*d_in + b*block_size + k]);
+        }
+        __syncthreads();
+    }
+    
+    out[i * d_out + j] = f32_to_f16_cuda(dot_prod);
+}
+#endif
+
+void matmul2d_f16_cuda_smem(const Float16* inp0, const Float16* inp1, Float16* out, int n_ctx, int d_in, int d_out, int start_pos)
+{
+#if defined(__NVCC__)
+    const int block_size = 256;
+    const int n_blocks = d_out / block_size;
+    matmul2d_f16_cuda_smem_impl<<<n_blocks, block_size>>>(inp0, inp1, out, n_ctx, d_in, d_out, start_pos);
+    cudaDeviceSynchronize();
+#endif
+}
+
+
 void matmul_2d(const char* inp0, const char* inp1, char* out, int d_in, int d_out, const InferenceState& s)
 {
     Timer timer{&metrics.matmul_ms};
@@ -688,7 +730,7 @@ void matmul_2d(const char* inp0, const char* inp1, char* out, int d_in, int d_ou
             break;
         }
         case Device::CUDA: {
-            matmul_2d_f16_cuda_coalesced((Float16*)inp0, (Float16*)inp1, (Float16*)out, s.n_ctx, d_in, d_out, s.start_pos);          
+            matmul_2d_f16_cuda_coalesced((Float16*)inp0, (Float16*)inp1, (Float16*)out, s.n_ctx, d_in, d_out, s.start_pos);
             break;
         }
     }
@@ -721,29 +763,27 @@ void qk_f16_cpu(const Float16* q, const Float16* k, Float16* out, int n_ctx, int
     }
 }
 
+
 #if defined(__NVCC__)
 __global__
 void qk_f16_cuda(const Float16* q, const Float16* k, Float16* out, int n_ctx, int q_heads, int kv_heads, int d_head, float scaler, int start_pos)
 {
-    const int th_idx = threadIdx.x;
-    const int th_stride = blockDim.x;
+    const int h = blockIdx.x * blockDim.x + threadIdx.x;
+    const int i = blockIdx.y * blockDim.y + threadIdx.y + start_pos;
 
     const int k_heads = kv_heads;
     // Note: In qroup query attn, we divide queries together into groups,
     // each of which share a single key and value.
     const int q_group_size = (int)(q_heads / k_heads);
 
-
-    for (int h = th_idx; h < q_heads; h += th_stride) {
-        for (int i = start_pos; i < n_ctx; i++) {
-            // Compute the dot products which are not subsequently masked.
-            const int end_non_masked = i + 1; 
-            for (int j = 0; j < end_non_masked; j++) {
-                const int hk = h / q_group_size;
-                float dot_prod;
-                vec_dot_product_f16_cuda(q + h * d_head + i * q_heads*d_head, k + hk*d_head + j * k_heads*d_head, d_head, &dot_prod);
-                out[h * n_ctx * n_ctx + i * n_ctx + j] = f32_to_f16_cuda(dot_prod * scaler);
-            }
+    if (h < q_heads && i < n_ctx) {
+        // Compute the dot products which are not subsequently masked.
+        const int end_non_masked = i + 1; 
+        for (int j = 0; j < end_non_masked; j++) {
+            const int hk = h / q_group_size;
+            float dot_prod;
+            vec_dot_product_f16_cuda(q + h * d_head + i * q_heads*d_head, k + hk*d_head + j * k_heads*d_head, d_head, &dot_prod);
+            out[h * n_ctx * n_ctx + i * n_ctx + j] = f32_to_f16_cuda(dot_prod * scaler);
         }
     }
 }
@@ -760,7 +800,9 @@ void qk(const char* q, const char* k, char* out, const InferenceState& s)
         }
         case Device::CUDA: {
 #if defined(__NVCC__)
-            qk_f16_cuda<<<LL32_CUDA_N_BLOCKS, LL32_CUDA_N_THREADS>>>((Float16*)q, (Float16*)k, (Float16*)out, s.n_ctx, s.n_heads, s.n_kv_heads, s.d_head, s.qk_scaler, s.start_pos);
+            dim3 grid_dim(ceil_div(s.n_heads, 16), ceil_div(s.n_ctx-s.start_pos, 16), 1);
+            dim3 block_dim(16, 16, 1);
+            qk_f16_cuda<<<grid_dim, block_dim>>>((Float16*)q, (Float16*)k, (Float16*)out, s.n_ctx, s.n_heads, s.n_kv_heads, s.d_head, s.qk_scaler, s.start_pos);
             cudaDeviceSynchronize();
 #endif            
             break;
@@ -930,26 +972,23 @@ void qkv_f16_cpu(const Float16* qk, const Float16* v, Float16* out, int n_ctx, i
 __global__
 void qkv_f16_cuda(const Float16* qk, const Float16* v, Float16* out, int n_ctx, int q_heads, int kv_heads, int d_head, int start_pos)
 {
-    const int th_idx = threadIdx.x;
-    const int th_stride = blockDim.x;
+    const int h = blockIdx.x * blockDim.x + threadIdx.x;
+    const int i = blockIdx.y * blockDim.y + threadIdx.y + start_pos;
+    const int j = blockIdx.z * blockDim.z + threadIdx.z;
 
     const int v_heads = kv_heads;
     const int qk_group_size = (int)(q_heads / v_heads);
-
-
-    for (int h = th_idx; h < q_heads; h += th_stride) {
-        for (int i = start_pos; i < n_ctx; i++) {
-            for (int j = 0; j < d_head; j++) {
-                float dot_prod = 0.0f;
-                for (int k = 0; k < n_ctx; k++) {
-                    // index of the current head in v.
-                    const int hv = h / qk_group_size;
-                    dot_prod += f16_to_f32_cuda(qk[h * n_ctx*n_ctx + i * n_ctx + k]) * f16_to_f32_cuda(v[hv * d_head + j + k * v_heads*d_head]);
-                }
-                out[i * q_heads*d_head + h*d_head + j] = f32_to_f16_cuda(dot_prod);
-            } 
+    
+    if (h < q_heads && i < n_ctx && j < d_head) {
+        float dot_prod = 0.0f;
+        for (int k = 0; k < n_ctx; k++) {
+            // index of the current head in v.
+            const int hv = h / qk_group_size;
+            dot_prod += f16_to_f32_cuda(qk[h * n_ctx*n_ctx + i * n_ctx + k]) * f16_to_f32_cuda(v[hv * d_head + j + k * v_heads*d_head]);
         }
-    }
+        out[i * q_heads*d_head + h*d_head + j] = f32_to_f16_cuda(dot_prod);
+    } 
+        
 }
 #endif
 
@@ -964,7 +1003,9 @@ void qkv(const char* qk, const char* v, char* out, const InferenceState& s)
         }
         case Device::CUDA: {
 #if defined(__NVCC__)
-            qkv_f16_cuda<<<LL32_CUDA_N_BLOCKS, LL32_CUDA_N_THREADS>>>((Float16*)qk, (Float16*)v, (Float16*)out, s.n_ctx, s.n_heads, s.n_kv_heads, s.d_head, s.start_pos);
+            dim3 grid_dim(ceil_div(s.n_heads, 8), ceil_div(s.n_ctx-s.start_pos, 8), ceil_div(s.d_head, 8));
+            dim3 block_dim(8, 8, 8);
+            qkv_f16_cuda<<<grid_dim, block_dim>>>((Float16*)qk, (Float16*)v, (Float16*)out, s.n_ctx, s.n_heads, s.n_kv_heads, s.d_head, s.start_pos);
             cudaDeviceSynchronize();
 #endif
             break;

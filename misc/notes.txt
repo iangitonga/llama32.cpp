@@ -14,15 +14,50 @@ However, a kernel can be executed by multiple equally-shaped thread blocks, so t
 threads is equal to the number of threads per block times the number of blocks.
 
 
-matmul<<<1, 256>>>(...)
 
-largest matrix
+-------------------------------
+ Tokens per sec      :   7.1
+ Inference [per tok] :   140ms
+ Sample time         :   699ms
+ Load time           :  2527ms
+ Inference [total]   : 50443ms
+ Total runtime       : 113646ms
+-------------------------------
+ Mem usage [total]   :  3348MB
+ Mem usage [model]   :  2471MB
+ Mem usage [actvs]   :   877MB
+-------------------------------
+ Matmul   [per tok]  :    88ms
+ NonMatmul [per tok] :    51ms
+-------------------------------
 
-512, 1024 1024, 768
-
-?How many dot prods are you calculating
-
-n_threads = 512 * 768 = 402,432
-
-threads_per_block=256
-num_blocks = n_threads/threads_per_block
+==1016== Profiling application: ./llama32 -p What is the meaning of UNESCO?
+==1016== Profiling result:
+            Type  Time(%)      Time     Calls       Avg       Min       Max  Name
+ GPU activities:   31.63%  15.2933s     37520  407.60us  98.590us  21.245ms  ops::matmul_2d_f16_cuda_coalesced_impl(unsigned short const *, unsigned short const *, unsigned short*, int, int, int, int)
+                   16.39%  7.92430s      5360  1.4784ms  102.33us  7.1187ms  ops::qkv_f16_cuda(unsigned short const *, unsigned short const *, unsigned short*, int, int, int, int, int)
+                   13.15%  6.35802s      5360  1.1862ms  1.1801ms  3.6031ms  ops::silu_inplace_f16_cuda(unsigned short*, int, int, int)
+                    9.49%  4.58667s      5360  855.72us  847.53us  3.2340ms  ops::mul_inplace_f16_cuda(unsigned short*, unsigned short const *, int, int, int)
+                    8.55%  4.13527s      5360  771.51us  101.28us  2.8549ms  ops::qk_f16_cuda(unsigned short const *, unsigned short const *, unsigned short*, int, int, int, int, float, int)
+                    6.86%  3.31507s       335  9.8957ms  9.6476ms  10.162ms  ops::lm_head_proj_f16_cuda(unsigned short const *, unsigned short const *, float*, int, int, int)
+                    6.79%  3.28556s     11055  297.20us  294.91us  1.4423ms  ops::rms_norm_f16_cuda(unsigned short const *, unsigned short const *, unsigned short*, int, int, int, float)
+                    4.74%  2.29009s     10720  213.63us  211.74us  858.70us  ops::residual_f16_cuda(unsigned short const *, unsigned short const *, unsigned short*, int, int, int)
+                    1.20%  580.08ms         1  580.08ms  580.08ms  580.08ms  [CUDA memcpy HtoD]
+                    0.72%  348.93ms      5360  65.098us  8.3200us  584.34us  ops::softmax_inplace_f16_cuda(unsigned short*, int, int, int)
+                    0.43%  207.05ms     10720  19.314us  15.647us  1.1821ms  ops::rotary_emb_f16_cuda(unsigned short*, int, int, int, int)
+                    0.03%  13.581ms       335  40.541us  40.095us  47.359us  [CUDA memcpy DtoH]
+                    0.02%  9.1325ms      6086  1.5000us  1.1200us  4.0960us  [CUDA memcpy DtoD]
+                    0.01%  6.2835ms      5360  1.1720us  1.0560us  42.559us  ops::attn_mask_inplace_f16_cuda(unsigned short*, int, int, int)
+      API calls:   96.08%  49.0823s    102845  477.25us  2.2600us  28.001ms  cudaDeviceSynchronize
+                    2.24%  1.14575s    102510  11.176us  3.2730us  344.28ms  cudaLaunchKernel
+                    1.43%  733.06ms      6422  114.15us  4.3460us  580.34ms  cudaMemcpy
+                    0.24%  121.56ms         1  121.56ms  121.56ms  121.56ms  cudaMalloc
+                    0.00%  2.5086ms         1  2.5086ms  2.5086ms  2.5086ms  cudaFree
+                    0.00%  158.48us       114  1.3900us     134ns  62.171us  cuDeviceGetAttribute
+                    0.00%  11.718us         1  11.718us  11.718us  11.718us  cuDeviceGetName
+                    0.00%  6.3850us         1  6.3850us  6.3850us  6.3850us  cuDeviceGetPCIBusId
+                    0.00%  3.3260us         1  3.3260us  3.3260us  3.3260us  cuDeviceTotalMem
+                    0.00%  1.5680us         3     522ns     187ns  1.1480us  cuDeviceGetCount
+                    0.00%  1.1680us         2     584ns     181ns     987ns  cuDeviceGet
+                    0.00%     472ns         1     472ns     472ns     472ns  cuModuleGetLoadingMode
+                    0.00%     229ns         1     229ns     229ns     229ns  cuDeviceGetUuid
