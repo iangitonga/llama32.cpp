@@ -584,15 +584,17 @@ void matmul_2d_f16_cpu(const Float16* inp0, const Float16* inp1, Float16* out, i
 __global__
 void matmul_2d_f16_cuda(const Float16* inp0, const Float16* inp1, Float16* out, int n_ctx, int d_in, int d_out, int start_pos)
 {
-    int th_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int th_stride = blockDim.x * gridDim.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
 
-    for (int i = start_pos; i < n_ctx; i++) {
-        for (int j = th_idx; j < d_out; j += th_stride) {
-            float dot_prod;
-            vec_dot_product_f16_cuda(inp0 + i*d_in, inp1 + j*d_in, d_in, &dot_prod);
+    i = i + start_pos;
+
+    if (i < n_ctx && j < d_out) {
+            float dot_prod = 0.0f;
+            for (int k = 0; k < d_in; k += 1) {
+                dot_prod += f16_to_f32_cuda(inp0[i*d_in + k]) * f16_to_f32_cuda(inp1[j*d_in + k]);
+            }
             out[i * d_out + j] = f32_to_f16_cuda(dot_prod);
-        }
     }   
 }
 #endif
@@ -608,16 +610,19 @@ void matmul_2d(const char* inp0, const char* inp1, char* out, int d_in, int d_ou
         }
         case Device::CUDA: {
 #if defined(__NVCC__)
-            int threads_per_block = 256;
-            int n_dot_prods = s.n_ctx * d_out;
-            int n_blocks = n_dot_prods / threads_per_block;
-            matmul_2d_f16_cuda<<<n_blocks, threads_per_block>>>((Float16*)inp0, (Float16*)inp1, (Float16*)out, s.n_ctx, d_in, d_out, s.start_pos);
+            int n_ctxm = s.n_ctx - s.start_pos;
+            dim3 block_dim(16, 16);
+            int n_ctx_c = (int)std::ceil(((float)n_ctxm)/16.0f);
+            int d_out_c = (int)std::ceil(((float)d_out)/16.0f);
+            dim3 grid_dim(n_ctx_c, d_out_c);
+            matmul_2d_f16_cuda<<<grid_dim, block_dim>>>((Float16*)inp0, (Float16*)inp1, (Float16*)out, s.n_ctx, d_in, d_out, s.start_pos);
             cudaDeviceSynchronize();
 #endif            
             break;
         }
     }
 }
+
 
 // q: (n_ctx, qn_embd) - (n_ctx, q_heads, d_head)[phy] -> (q_heads, n_ctx, d_head)[virt]
 // k: (n_ctx, kn_embd) - (n_ctx, k_heads, d_head)[phy] -> (k_heads, n_ctx, d_head)[virt]
