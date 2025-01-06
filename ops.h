@@ -14,7 +14,12 @@
 
 #if defined(__NVCC__)
 #define LL32_CUDA_N_BLOCKS 1
-#define LL32_CUDA_N_THREADS 512
+#define LL32_CUDA_N_THREADS 256
+
+#if __CUDACC_VER_MAJOR__ > 8
+#include <cuda_fp16.h>
+#endif
+
 #endif
 
 
@@ -153,7 +158,11 @@ inline float f16_to_f32_cpu(Float16 half) {
 [[nodiscard]]
 __device__
 inline float f16_to_f32_cuda(Float16 half) {
+#if __CUDACC_VER_MAJOR__ > 8
+    return __half2float(*((__half*)&half));
+#else
     return fpcvt::fp16_to_fp32(half);
+#endif
 }
 #endif
 
@@ -172,7 +181,12 @@ inline Float16 f32_to_f16_cpu(float flt) {
 [[nodiscard]]
 __device__
 inline Float16 f32_to_f16_cuda(float flt) {
+#if __CUDACC_VER_MAJOR__ > 8
+    __half hlf = __float2half(flt);
+    return *((Float16*)&hlf);
+#else
     return fpcvt::fp32_to_fp16(flt);
+#endif
 }
 #endif
 
@@ -682,58 +696,50 @@ void matmul_2d_f16_cuda_coalesced(const Float16* inp0, const Float16* inp1, Floa
 #endif
 }
 
-/*
 
-Tiled mamul implementation.
-
-*/
+// Tiled mamul implementation. Each block in the grid computes a (blocksize, blocksize)
+// submatrix in the output and each thread in the block computes a single value of that submatrix.
 #if defined(__NVCC__)
 __global__
 void matmul2d_f16_cuda_block_impl(const Float16* inp0, const Float16* inp1, Float16* out, int n_ctx, int d_in, int d_out, int start_pos)
 {
-    // C = d_out(blockIdx.y*blocksize + threadIdx.y) + blockIdx.x*blocksize + threadIdx.x;
-    // A = blockIdx.y*blocksize*d_in + b*blocksize + threadIdx.y*d_in + threadIdx.x;
-
     const int blockrow = blockIdx.x;
     const int blockcol = blockIdx.y;
 
     const int row = threadIdx.y;
     const int col = threadIdx.x;
 
-    // threadIdx.x -> x position within submatrix
     constexpr int blocksize = 16;
     const int inp0_rowidx = start_pos + blockrow*blocksize + row;
     const int inp1_rowidx = blockcol*blocksize + row;
     const int out_rowidx = start_pos + blockrow*blocksize + row;
 
-    // if (inp0_rowidx < n_ctx && inp1_rowidx < d_out)
-    {
-        const int nblocks = d_in / blocksize;
+    const int nblocks = d_in / blocksize;
 
-        float dot_prod = 0.0f;
+    float dot_prod = 0.0f;
+    for (int b = 0; b < nblocks; b++) {
+        __shared__ Float16 inp0_hot[blocksize][blocksize];
+        __shared__ Float16 inp1_hot[blocksize][blocksize];
 
-        for (int b = 0; b < nblocks; b++) {
-            __shared__ Float16 inp0_hot[blocksize][blocksize];
-            __shared__ Float16 inp1_hot[blocksize][blocksize];
-
-            inp0_hot[row][col] = 0;
+        // Conditional handles cases where n_ctx is not a multiple of blocksize. d_in and
+        // d_out are always a multiple of blocksize.
+        inp0_hot[row][col] = 0;
+        if (inp0_rowidx < n_ctx) {
             const int inp0_idx = inp0_rowidx*d_in + col + b*blocksize;
-            if (inp0_idx < n_ctx*d_in) {
-                inp0_hot[row][col] = inp0[inp0_idx];
-            }
-            inp1_hot[row][col] = inp1[inp1_rowidx*d_in + col + b*blocksize];
-            __syncthreads();
-
-            for (int i = 0; i < blocksize; i++) {
-                dot_prod += f16_to_f32_cuda(inp0_hot[row][i]) * f16_to_f32_cuda(inp1_hot[col][i]);
-            }
-            __syncthreads();
+            inp0_hot[row][col] = inp0[inp0_idx];
         }
+        inp1_hot[row][col] = inp1[inp1_rowidx*d_in + col + b*blocksize];
+        __syncthreads();
 
+        for (int i = 0; i < blocksize; i++) {
+            dot_prod += f16_to_f32_cuda(inp0_hot[row][i]) * f16_to_f32_cuda(inp1_hot[col][i]);
+        }
+        __syncthreads();
+    }
+
+    if (out_rowidx < n_ctx) {
         const int out_idx = out_rowidx*d_out + blockcol*blocksize + col;
-        if (out_idx < n_ctx * d_out) {
-            out[out_idx] = f32_to_f16_cuda(dot_prod);
-        }
+        out[out_idx] = f32_to_f16_cuda(dot_prod);
     }
 }
 #endif
