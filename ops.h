@@ -682,39 +682,69 @@ void matmul_2d_f16_cuda_coalesced(const Float16* inp0, const Float16* inp1, Floa
 #endif
 }
 
+/*
 
+Tiled mamul implementation.
+
+*/
 #if defined(__NVCC__)
 __global__
-void matmul2d_f16_cuda_smem_impl(const Float16* inp0, const Float16* inp1, Float16* out, int n_ctx, int d_in, int d_out, int start_pos) {
-    constexpr int block_size = 256;
-    const int n_in_blocks = d_in / block_size;
+void matmul2d_f16_cuda_block_impl(const Float16* inp0, const Float16* inp1, Float16* out, int n_ctx, int d_in, int d_out, int start_pos)
+{
+    // C = d_out(blockIdx.y*blocksize + threadIdx.y) + blockIdx.x*blocksize + threadIdx.x;
+    // A = blockIdx.y*blocksize*d_in + b*blocksize + threadIdx.y*d_in + threadIdx.x;
 
-    const int i = start_pos;
-    const int j = blockIdx.x * blockDim.x + threadIdx.x;
+    const int blockrow = blockIdx.x;
+    const int blockcol = blockIdx.y;
 
-    float dot_prod = 0.0f;
-    for (int b = 0; b < n_in_blocks; b++) {
+    const int row = threadIdx.y;
+    const int col = threadIdx.x;
 
-        __shared__ Float16 inp0_hot[block_size];
-        inp0_hot[threadIdx.x] = inp0[i * d_in + b*block_size + threadIdx.x];
-        __syncthreads();
+    // threadIdx.x -> x position within submatrix
+    constexpr int blocksize = 16;
+    const int inp0_rowidx = start_pos + blockrow*blocksize + row;
+    const int inp1_rowidx = blockcol*blocksize + row;
+    const int out_rowidx = start_pos + blockrow*blocksize + row;
 
-        for (int k = 0; k < block_size; k += 1) {
-            dot_prod += f16_to_f32_cuda(inp0_hot[k]) * f16_to_f32_cuda(inp1[j*d_in + b*block_size + k]);
+    // if (inp0_rowidx < n_ctx && inp1_rowidx < d_out)
+    {
+        const int nblocks = d_in / blocksize;
+
+        float dot_prod = 0.0f;
+
+        for (int b = 0; b < nblocks; b++) {
+            __shared__ Float16 inp0_hot[blocksize][blocksize];
+            __shared__ Float16 inp1_hot[blocksize][blocksize];
+
+            inp0_hot[row][col] = 0;
+            const int inp0_idx = inp0_rowidx*d_in + col + b*blocksize;
+            if (inp0_idx < n_ctx*d_in) {
+                inp0_hot[row][col] = inp0[inp0_idx];
+            }
+            inp1_hot[row][col] = inp1[inp1_rowidx*d_in + col + b*blocksize];
+            __syncthreads();
+
+            for (int i = 0; i < blocksize; i++) {
+                dot_prod += f16_to_f32_cuda(inp0_hot[row][i]) * f16_to_f32_cuda(inp1_hot[col][i]);
+            }
+            __syncthreads();
         }
-        __syncthreads();
+
+        const int out_idx = out_rowidx*d_out + blockcol*blocksize + col;
+        if (out_idx < n_ctx * d_out) {
+            out[out_idx] = f32_to_f16_cuda(dot_prod);
+        }
     }
-    
-    out[i * d_out + j] = f32_to_f16_cuda(dot_prod);
 }
 #endif
 
-void matmul2d_f16_cuda_smem(const Float16* inp0, const Float16* inp1, Float16* out, int n_ctx, int d_in, int d_out, int start_pos)
+void matmul2d_f16_cuda_block(const Float16* inp0, const Float16* inp1, Float16* out, int n_ctx, int d_in, int d_out, int start_pos)
 {
 #if defined(__NVCC__)
-    const int block_size = 256;
-    const int n_blocks = d_out / block_size;
-    matmul2d_f16_cuda_smem_impl<<<n_blocks, block_size>>>(inp0, inp1, out, n_ctx, d_in, d_out, start_pos);
+    const int blocksize = 16;
+    const dim3 block_dim(blocksize, blocksize, 1);
+    const dim3 grid_dim(ceil_div(n_ctx-start_pos, blocksize), ceil_div(d_out, blocksize), 1);
+    matmul2d_f16_cuda_block_impl<<<grid_dim, block_dim>>>(inp0, inp1, out, n_ctx, d_in, d_out, start_pos);
     cudaDeviceSynchronize();
 #endif
 }
@@ -730,7 +760,11 @@ void matmul_2d(const char* inp0, const char* inp1, char* out, int d_in, int d_ou
             break;
         }
         case Device::CUDA: {
-            matmul_2d_f16_cuda_coalesced((Float16*)inp0, (Float16*)inp1, (Float16*)out, s.n_ctx, d_in, d_out, s.start_pos);
+            if (s.start_pos == 0) {
+                matmul2d_f16_cuda_block((Float16*)inp0, (Float16*)inp1, (Float16*)out, s.n_ctx, d_in, d_out, s.start_pos);
+            } else {
+                matmul_2d_f16_cuda_coalesced((Float16*)inp0, (Float16*)inp1, (Float16*)out, s.n_ctx, d_in, d_out, s.start_pos);
+            }
             break;
         }
     }
