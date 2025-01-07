@@ -865,8 +865,8 @@ void attn_mask_inplace_f16_cpu(Float16* inp, int n_heads, int n_ctx, int start_p
 __global__
 void attn_mask_inplace_f16_cuda(Float16* inp, int n_heads, int n_ctx, int start_pos)
 {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x + start_pos;
-    const int j = blockIdx.y * blockDim.y + threadIdx.y;
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int j = blockIdx.y * blockDim.y + threadIdx.y + start_pos;
 
     if (i < n_heads && j < n_ctx) {
         const int start_ix = j + 1;
@@ -931,8 +931,8 @@ void softmax_inplace_f16_cpu(Float16* inp, int n_heads, int n_ctx, int start_pos
 __global__
 void softmax_inplace_f16_cuda(Float16* inp, int n_heads, int n_ctx, int start_pos)
 {
-    const int h = blockIdx.x * blockDim.x + threadIdx.x + start_pos;
-    const int i = blockIdx.y * blockDim.y + threadIdx.y;
+    const int h = blockIdx.x * blockDim.x + threadIdx.x;
+    const int i = blockIdx.y * blockDim.y + threadIdx.y + start_pos;
 
     if (h < n_heads && i < n_ctx) {
         float max = -INFINITY;
