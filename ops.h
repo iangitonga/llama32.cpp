@@ -13,13 +13,9 @@
 #endif
 
 #if defined(__NVCC__)
-#define LL32_CUDA_N_BLOCKS 1
-#define LL32_CUDA_N_THREADS 256
-
 #if __CUDACC_VER_MAJOR__ > 8
 #include <cuda_fp16.h>
 #endif
-
 #endif
 
 
@@ -271,10 +267,9 @@ void rms_norm_f16_cpu(const Float16* inp, const Float16* weight, Float16* out, i
 __global__
 void rms_norm_f16_cuda(const Float16* inp, const Float16* weight, Float16* out, int n_ctx, int d_embd, int start_pos, float eps)
 {
-    const int th_idx = threadIdx.x;
-    const int th_stride = blockDim.x;
+    const int i = blockIdx.x * blockDim.x + threadIdx.x + start_pos;
 
-    for (int i = start_pos + th_idx; i < n_ctx; i += th_stride) {
+    if (i < n_ctx) {
         float sum_squares = 0.0f;
         for (int j = 0; j < d_embd; j++) {
             /// TODO: Use predefined pow fn.
@@ -302,7 +297,10 @@ void rms_norm(const char* inp, const char* weight, char* out, const InferenceSta
         }
         case Device::CUDA: {
 #if defined(__NVCC__)
-            rms_norm_f16_cuda<<<LL32_CUDA_N_BLOCKS, LL32_CUDA_N_THREADS>>>((Float16*)inp, (Float16*)weight, (Float16*)out, s.n_ctx, s.d_embd, s.start_pos, s.rms_norm_eps);
+            const int blocksize=16*16;
+            dim3 grid_dim(ceil_div(s.n_ctx-s.start_pos, blocksize), 1, 1);
+            dim3 block_dim(blocksize, 1, 1);
+            rms_norm_f16_cuda<<<grid_dim, block_dim>>>((Float16*)inp, (Float16*)weight, (Float16*)out, s.n_ctx, s.d_embd, s.start_pos, s.rms_norm_eps);
             cudaDeviceSynchronize();
 #endif            
             break;
@@ -327,13 +325,11 @@ void residual_f16_cpu(const Float16* inp0, const Float16* inp1, Float16* out, in
 __global__
 void residual_f16_cuda(const Float16* inp0, const Float16* inp1, Float16* out, int n_ctx, int d_embd, int start_pos)
 {
-    const int th_idx = threadIdx.x;
-    const int th_stride = blockDim.x;
+    const int i = blockIdx.x * blockDim.x + threadIdx.x + start_pos;
+    const int j = blockIdx.y * blockDim.y + threadIdx.y;
 
-    for (int i = start_pos + th_idx; i < n_ctx; i += th_stride) {
-        for (int j = 0; j < d_embd; j++) {
-            out[i * d_embd + j] = f32_to_f16_cuda(f16_to_f32_cuda(inp0[i * d_embd + j]) + f16_to_f32_cuda(inp1[i * d_embd + j]));
-        }
+    if (i < n_ctx && j < d_embd) {
+        out[i * d_embd + j] = f32_to_f16_cuda(f16_to_f32_cuda(inp0[i * d_embd + j]) + f16_to_f32_cuda(inp1[i * d_embd + j]));
     }
 }
 #endif
@@ -349,7 +345,9 @@ void residual(const char* inp0, const char* inp1, char* out, const InferenceStat
         }
         case Device::CUDA: {
 #if defined(__NVCC__)
-            residual_f16_cuda<<<LL32_CUDA_N_BLOCKS, LL32_CUDA_N_THREADS>>>((Float16*)inp0, (Float16*)inp1, (Float16*)out, s.n_ctx, s.d_embd, s.start_pos);
+            dim3 grid_dim(ceil_div(s.n_ctx-s.start_pos, 16), ceil_div(s.d_mlp, 16), 1);
+            dim3 block_dim(16, 16, 1);
+            residual_f16_cuda<<<grid_dim, block_dim>>>((Float16*)inp0, (Float16*)inp1, (Float16*)out, s.n_ctx, s.d_embd, s.start_pos);
             cudaDeviceSynchronize();
 #endif            
             break;
@@ -553,9 +551,9 @@ void lm_head_proj_f16_cuda(const Float16* inp, const Float16* weight, float* out
     const int j = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (j < n_vocab) {
-            float dot_prod;
-            vec_dot_product_f16_cuda(inp + i * d_embd, weight + j*d_embd, d_embd, &dot_prod);
-            out[j] = dot_prod;
+        float dot_prod;
+        vec_dot_product_f16_cuda(inp + i * d_embd, weight + j*d_embd, d_embd, &dot_prod);
+        out[j] = dot_prod;
     }
 }
 #endif
@@ -867,15 +865,13 @@ void attn_mask_inplace_f16_cpu(Float16* inp, int n_heads, int n_ctx, int start_p
 __global__
 void attn_mask_inplace_f16_cuda(Float16* inp, int n_heads, int n_ctx, int start_pos)
 {
-    const int th_idx = threadIdx.x;
-    const int th_stride = blockDim.x;
+    const int i = blockIdx.x * blockDim.x + threadIdx.x + start_pos;
+    const int j = blockIdx.y * blockDim.y + threadIdx.y;
 
-    for (int i = th_idx; i < n_heads; i += th_stride) {
-        for (int j = start_pos; j < n_ctx; j++) {
-            const int start_ix = j + 1;
-            for (int k = start_ix; k < n_ctx; k++) {
-                inp[i * n_ctx * n_ctx + j * n_ctx + k] = f32_to_f16_cuda(-INFINITY);
-            }
+    if (i < n_heads && j < n_ctx) {
+        const int start_ix = j + 1;
+        for (int k = start_ix; k < n_ctx; k++) {
+            inp[i * n_ctx * n_ctx + j * n_ctx + k] = f32_to_f16_cuda(-INFINITY);
         }
     }
 }
@@ -892,7 +888,9 @@ void attn_mask_inplace(char* inp, const InferenceState& s)
         }
         case Device::CUDA: {
 #if defined(__NVCC__)
-            attn_mask_inplace_f16_cuda<<<LL32_CUDA_N_BLOCKS, LL32_CUDA_N_THREADS>>>((Float16*)inp, s.n_heads, s.n_ctx, s.start_pos);
+            dim3 grid_dim(ceil_div(s.n_heads, 16), ceil_div(s.n_ctx-s.start_pos, 16), 1);
+            dim3 block_dim(16, 16, 1);
+            attn_mask_inplace_f16_cuda<<<grid_dim, block_dim>>>((Float16*)inp, s.n_heads, s.n_ctx, s.start_pos);
             cudaDeviceSynchronize();
 #endif
             break;
@@ -933,31 +931,29 @@ void softmax_inplace_f16_cpu(Float16* inp, int n_heads, int n_ctx, int start_pos
 __global__
 void softmax_inplace_f16_cuda(Float16* inp, int n_heads, int n_ctx, int start_pos)
 {
-    const int th_idx = threadIdx.x;
-    const int th_stride = blockDim.x;
+    const int h = blockIdx.x * blockDim.x + threadIdx.x + start_pos;
+    const int i = blockIdx.y * blockDim.y + threadIdx.y;
 
-    for (int h = th_idx; h < n_heads; h += th_stride) {
-        for (int i = start_pos; i < n_ctx; i++) {
-            float max = -INFINITY;
-            for (int j = 0; j < n_ctx; j++) {
-                const float val = f16_to_f32_cuda(inp[h * n_ctx * n_ctx + i * n_ctx + j]);
-                if (val > max) {
-                    max = val;
-                }
+    if (h < n_heads && i < n_ctx) {
+        float max = -INFINITY;
+        for (int j = 0; j < n_ctx; j++) {
+            const float val = f16_to_f32_cuda(inp[h * n_ctx * n_ctx + i * n_ctx + j]);
+            if (val > max) {
+                max = val;
             }
+        }
 
-            float sum_exp = 0;
-            for (int j = 0; j < n_ctx; j++) {
-                const int idx = h * n_ctx * n_ctx + i * n_ctx + j;
-                const float res = expf(f16_to_f32_cuda(inp[idx]) - max);
-                sum_exp += res;
-                inp[idx] = f32_to_f16_cuda(res);
-            }
+        float sum_exp = 0;
+        for (int j = 0; j < n_ctx; j++) {
+            const int idx = h * n_ctx * n_ctx + i * n_ctx + j;
+            const float res = expf(f16_to_f32_cuda(inp[idx]) - max);
+            sum_exp += res;
+            inp[idx] = f32_to_f16_cuda(res);
+        }
 
-            for (int j = 0; j < n_ctx; j++) {
-                const int idx = h * n_ctx * n_ctx + i * n_ctx + j;
-                inp[idx] = f32_to_f16_cuda(f16_to_f32_cuda(inp[idx]) / sum_exp);
-            }
+        for (int j = 0; j < n_ctx; j++) {
+            const int idx = h * n_ctx * n_ctx + i * n_ctx + j;
+            inp[idx] = f32_to_f16_cuda(f16_to_f32_cuda(inp[idx]) / sum_exp);
         }
     }
 }
@@ -974,7 +970,9 @@ void softmax_inplace(char* inp, const InferenceState& s)
         }
         case Device::CUDA: {
 #if defined(__NVCC__)
-            softmax_inplace_f16_cuda<<<LL32_CUDA_N_BLOCKS, LL32_CUDA_N_THREADS>>>((Float16*)inp, s.n_heads, s.n_ctx, s.start_pos);
+            dim3 grid_dim(ceil_div(s.n_heads, 16), ceil_div(s.n_ctx-s.start_pos, 16), 1);
+            dim3 block_dim(16, 16, 1);
+            softmax_inplace_f16_cuda<<<grid_dim, block_dim>>>((Float16*)inp, s.n_heads, s.n_ctx, s.start_pos);
             cudaDeviceSynchronize();
 #endif
             break;
@@ -1113,58 +1111,56 @@ void rotary_emb_f16_cpu(Float16* inp, int n_ctx, int n_heads, int d_head, int st
 __global__
 void rotary_emb_f16_cuda(Float16* inp, int n_ctx, int n_heads, int d_head, int start_pos)
 {
-    const int th_idx = threadIdx.x;
-    const int th_stride = blockDim.x;
+    const int i = blockIdx.x * blockDim.x + threadIdx.x + start_pos;
+    const int h = blockIdx.y * blockDim.y + threadIdx.y;
 
-    for (int i = start_pos; i < n_ctx; ++i) {
-       for (int h = th_idx; h < n_heads; h += th_stride) {
-            Float16* inp_vec = inp + i*n_heads*d_head + h*d_head;
+    if (i < n_ctx && h < n_heads) {
+        Float16* inp_vec = inp + i*n_heads*d_head + h*d_head;
 
-            const int d_half = d_head / 2;
-            for (int j = 0; j < d_half; ++j) {
-                const float x0 = f16_to_f32_cuda(inp_vec[j]);
-                const float x1 = f16_to_f32_cuda(inp_vec[j + d_half]);
-                
-                const float d = (float)(d_head);
-                const float base_theta = 500000.0f;
+        const int d_half = d_head / 2;
+        for (int j = 0; j < d_half; ++j) {
+            const float x0 = f16_to_f32_cuda(inp_vec[j]);
+            const float x1 = f16_to_f32_cuda(inp_vec[j + d_half]);
+            
+            const float d = (float)(d_head);
+            const float base_theta = 500000.0f;
 
-                float inv_freq = powf(base_theta, -(2.0f*j/d));
+            float inv_freq = powf(base_theta, -(2.0f*j/d));
 
-                { // llama 3 rope modifications
-                    const float factor = 32.0f;
-                    const float low_freq_factor = 1.0f;
-                    const float high_freq_factor = 4.0f;
-                    const float old_context_len = 8192.0f;
+            { // llama 3 rope modifications
+                const float factor = 32.0f;
+                const float low_freq_factor = 1.0f;
+                const float high_freq_factor = 4.0f;
+                const float old_context_len = 8192.0f;
 
-                    const float low_freq_wavelen = old_context_len / low_freq_factor;
-                    const float high_freq_wavelen = old_context_len / high_freq_factor;
+                const float low_freq_wavelen = old_context_len / low_freq_factor;
+                const float high_freq_wavelen = old_context_len / high_freq_factor;
 
-                    const float pi = 3.141592653589793f;
-                    const float wavelen = 2 * pi / inv_freq;
+                const float pi = 3.141592653589793f;
+                const float wavelen = 2 * pi / inv_freq;
 
-                    float inv_freq_llama = inv_freq;
+                float inv_freq_llama = inv_freq;
 
-                    if (wavelen > low_freq_wavelen) {
-                        inv_freq_llama = inv_freq / factor;
-                    }
-                    if ((wavelen <= low_freq_wavelen) && (wavelen >= high_freq_wavelen)) {
-                        const float smooth_factor = (old_context_len / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor);
-                        const float smoothed_inv_freq = (1 - smooth_factor) * inv_freq_llama / factor + smooth_factor * inv_freq_llama;
-                        inv_freq_llama = smoothed_inv_freq;
-                    }
-
-                    inv_freq = inv_freq_llama;
+                if (wavelen > low_freq_wavelen) {
+                    inv_freq_llama = inv_freq / factor;
+                }
+                if ((wavelen <= low_freq_wavelen) && (wavelen >= high_freq_wavelen)) {
+                    const float smooth_factor = (old_context_len / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor);
+                    const float smoothed_inv_freq = (1 - smooth_factor) * inv_freq_llama / factor + smooth_factor * inv_freq_llama;
+                    inv_freq_llama = smoothed_inv_freq;
                 }
 
-                const float m = (float)(i);
-                const float m_theta_i = m * inv_freq;
-
-                const float o0 = x0 * cosf(m_theta_i) - x1 * sinf(m_theta_i);
-                const float o1 = x0 * sinf(m_theta_i) + x1 * cosf(m_theta_i);
-
-                inp_vec[j] = f32_to_f16_cuda(o0);
-                inp_vec[j + d_half] = f32_to_f16_cuda(o1);
+                inv_freq = inv_freq_llama;
             }
+
+            const float m = (float)(i);
+            const float m_theta_i = m * inv_freq;
+
+            const float o0 = x0 * cosf(m_theta_i) - x1 * sinf(m_theta_i);
+            const float o1 = x0 * sinf(m_theta_i) + x1 * cosf(m_theta_i);
+
+            inp_vec[j] = f32_to_f16_cuda(o0);
+            inp_vec[j + d_half] = f32_to_f16_cuda(o1);
         }
     }
 }
@@ -1182,7 +1178,9 @@ void rotary_emb(char* inp, int n_heads, const InferenceState& s)
         }
         case Device::CUDA: {
 #if defined(__NVCC__)
-            rotary_emb_f16_cuda<<<LL32_CUDA_N_BLOCKS, LL32_CUDA_N_THREADS>>>((Float16*)inp, s.n_ctx, n_heads, s.d_head, s.start_pos);
+            dim3 grid_dim(ceil_div(s.n_ctx-s.start_pos, 16), ceil_div(s.n_heads, 16), 1);
+            dim3 block_dim(16, 16, 1);
+            rotary_emb_f16_cuda<<<grid_dim, block_dim>>>((Float16*)inp, s.n_ctx, n_heads, s.d_head, s.start_pos);
             cudaDeviceSynchronize();
 #endif
             break;
